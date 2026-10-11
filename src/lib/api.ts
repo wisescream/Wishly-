@@ -556,15 +556,29 @@ export async function sendAiMessage(
   styleProfile: StyleProfile | null,
   history: AiMessage[]
 ): Promise<{ content: string; suggestions: AiSuggestion[] } | null> {
-  try {
-    const { data, error } = await supabase.functions.invoke("ai-assistant", {
-      body: { message, styleProfile, history: history.slice(-10) },
-    });
-    if (error) throw error;
-    return data;
-  } catch {
-    return null;
+  const { data, error } = await supabase.functions.invoke("ai-assistant", {
+    body: { message, styleProfile, history: history.slice(-10) },
+  });
+  if (error) throw await getFunctionError(error, 'The shopping assistant is unavailable right now.');
+  return data;
+}
+
+export async function getFunctionError(error: unknown, fallback: string): Promise<Error> {
+  const context = error && typeof error === 'object' && 'context' in error
+    ? (error as { context?: unknown }).context
+    : null;
+  if (context instanceof Response) {
+    try {
+      const payload = await context.clone().json() as { error?: unknown; message?: unknown };
+      const message = typeof payload.error === 'string' ? payload.error : payload.message;
+      if (typeof message === 'string' && message.trim()) return new Error(message);
+    } catch {
+      // The server returned a non-JSON response; use the caller's safe fallback.
+    }
+    if (context.status === 401) return new Error('Your session expired. Sign in again, then retry.');
+    if (context.status === 429) return new Error('Too many requests. Wait a moment and retry.');
   }
+  return new Error(fallback);
 }
 
 // ═══════════════════════════════════════════════════════════════

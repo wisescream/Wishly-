@@ -92,8 +92,26 @@ serve(async (req) => {
     let searchResponse: Response;
     try { searchResponse = await fetch(searchUrl, { signal: controller.signal }); }
     finally { clearTimeout(timeout); }
-    if (!searchResponse.ok) return reply({ configured: true, status: "partial", offers_found: 0, error: "Shopping provider is temporarily unavailable." }, 502);
+    const searchAttemptAt = new Date().toISOString();
+    if (!searchResponse.ok) {
+      const message = searchResponse.status === 429
+        ? "The shopping provider rate limit was reached. Previously saved offers were kept."
+        : "The shopping provider is temporarily unavailable. Previously saved offers were kept.";
+      await admin.from("items").update({
+        enrichment_status: "partial",
+        enrichment_error: message,
+        last_offer_search_at: searchAttemptAt,
+      }).eq("id", item.id);
+      const { count } = await userClient.from("store_offers").select("id", { count: "exact", head: true }).eq("item_id", item.id);
+      return reply({ configured: true, status: "partial", offers_found: count || 0, error: message });
+    }
     const payload = await searchResponse.json();
+    if (typeof payload.error === "string" && payload.error.trim()) {
+      const message = "The shopping provider could not complete this search. Previously saved offers were kept.";
+      await admin.from("items").update({ enrichment_status: "partial", enrichment_error: message, last_offer_search_at: searchAttemptAt }).eq("id", item.id);
+      const { count } = await userClient.from("store_offers").select("id", { count: "exact", head: true }).eq("item_id", item.id);
+      return reply({ configured: true, status: "partial", offers_found: count || 0, error: message });
+    }
     const rows = Array.isArray(payload.shopping_results) ? payload.shopping_results : [];
     const targetGtin = normalizedDigits(item.gtin);
     const targetModel = String(item.model_number || "").toLowerCase();

@@ -20,7 +20,7 @@ serve(async (req) => {
     const apiKey = Deno.env.get("OPENAI_API_KEY");
 
     if (!apiKey) {
-      return new Response(JSON.stringify({ error: "The assistant is not configured." }), {
+      return new Response(JSON.stringify({ error: "AI assistant is not configured. Add OPENAI_API_KEY to the Supabase Edge Function secrets to enable chat." }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 503,
       });
     }

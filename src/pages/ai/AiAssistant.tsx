@@ -75,14 +75,15 @@ export default function AiAssistant() {
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The assistant is unavailable right now.';
       setMessages((prev) => [...prev, {
         id: `error_${Date.now()}`,
         role: 'assistant',
-        content: 'The assistant is unavailable right now. You can still search for a product or add one manually.',
+        content: `${message} You can still search for a product or add one manually.`,
         timestamp: new Date(),
       }]);
-      toast.error('Could not connect to AI service');
+      toast.error(message);
     } finally {
       setLoading(false);
     }

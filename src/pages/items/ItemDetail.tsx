@@ -22,7 +22,7 @@ import { Input } from '@/components/ui/input';
 import { PriorityBadge } from '@/components/shared/PriorityBadge';
 import { PriceChart } from '@/components/shared/PriceChart';
 import { StoreComparisonTable } from '@/components/shared/StoreComparisonTable';
-import { getItem, updateItem, deleteItem, reserveItem, unreserveItem, getStyleProfile } from '@/lib/api';
+import { getItem, updateItem, deleteItem, reserveItem, unreserveItem, getStyleProfile, getFunctionError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { type Currency, formatPrice } from '@/lib/currency';
@@ -88,13 +88,14 @@ export default function ItemDetail() {
   const refreshOffersMutation = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke('refresh-offers', { body: { item_id: id } });
-      if (error) throw error;
+      if (error) throw await getFunctionError(error, 'Offer search could not reach its provider. Your saved offers are unchanged.');
       if (data?.error) throw new Error(data.error);
       return data;
     },
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ['item-detail', id] });
-      toast.success(result?.offers_found ? `Found ${result.offers_found} current provider listing${result.offers_found === 1 ? '' : 's'}` : 'No reliable exact offers found in the configured source');
+      if (result?.status === 'partial') toast.error(result.error || 'The search provider is temporarily unavailable. Previously saved offers are unchanged.');
+      else toast.success(result?.offers_found ? `Found ${result.offers_found} provider listing${result.offers_found === 1 ? '' : 's'}` : 'No reliable exact offers found in the configured source');
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : 'Offer search failed. Try again later.'),
   });

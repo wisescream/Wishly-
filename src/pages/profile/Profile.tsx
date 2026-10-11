@@ -4,24 +4,16 @@ import { useQuery } from '@tanstack/react-query';
 import {
   Settings,
   Crown,
-  Edit,
-  Sparkles,
-  ShoppingBag,
-  Palette,
-  Tag,
-  LogOut,
 } from 'lucide-react';
 import { AppShell } from '@/components/layout/AppShell';
 import { Header } from '@/components/layout/Header';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Card, CardContent } from '@/components/ui/card';
 import { ListCard } from '@/components/shared/ListCard';
 import { MySizes } from '@/components/profile/MySizes';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCurrency } from '@/contexts/CurrencyContext';
-import { getWishlists, getStyleProfile, signOut } from '@/lib/api';
+import { getWishlists, getStyleProfile } from '@/lib/api';
 import { getInitials } from '@/lib/utils';
 import { COUNTRIES } from '@/lib/constants';
 
@@ -118,60 +110,6 @@ export default function Profile() {
               </div>
             </div>
           </div>
-
-          {/* Style & Fit Profile Summary */}
-          <Card className="rounded-3xl glass-card border border-border/50 p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-purple-400" />
-                <h3 className="text-xs font-bold text-foreground">
-                  Style & Fit Profile (AI Context)
-                </h3>
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => navigate('/onboarding')}
-                className="h-7 text-xs text-primary font-semibold hover:text-primary"
-              >
-                Edit
-              </Button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="p-2.5 rounded-xl bg-card/40 border border-border/40">
-                <span className="text-[10px] text-muted-foreground block">Top & Bottom</span>
-                <strong className="text-foreground">
-                  {(styleProfile?.apparel_sizes as any)?.tops?.preferred || (styleProfile?.apparel_sizes as any)?.tops?.actual || 'Not set'}
-                </strong>
-              </div>
-              <div className="p-2.5 rounded-xl bg-card/40 border border-border/40">
-                <span className="text-[10px] text-muted-foreground block">Shoe Size</span>
-                <strong className="text-foreground">
-                  {(styleProfile?.shoe_sizes as any)?.preferred?.value || (styleProfile?.shoe_sizes as any)?.actual?.value || styleProfile?.shoe_size || 'Not set'}
-                </strong>
-              </div>
-            </div>
-
-            {styleProfile?.style_tags && styleProfile.style_tags.length > 0 && (
-              <div className="pt-1">
-                <span className="text-[10px] text-muted-foreground block mb-1">
-                  Style Aesthetics
-                </span>
-                <div className="flex flex-wrap gap-1">
-                  {styleProfile.style_tags.map((tag) => (
-                    <Badge
-                      key={tag}
-                      variant="outline"
-                      className="text-[10px] rounded-lg bg-card/60"
-                    >
-                      {tag}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            )}
-          </Card>
 
           {profile?.id && <MySizes userId={profile.id} profile={styleProfile || null} />}
 

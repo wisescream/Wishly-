@@ -28,7 +28,17 @@ const initialEntry = (source: unknown): Entry => {
   return { ...emptyEntry(), actual: String(value.actual ?? ''), preferred: String(value.preferred ?? ''), fit: String(value.fit ?? 'regular'), system: String(value.system ?? 'International'), alternatives: Array.isArray(value.alternatives) ? value.alternatives.join(', ') : '' };
 };
 
-export function MySizes({ userId, profile }: { userId: string; profile: StyleProfile | null }) {
+export function MySizes({
+  userId,
+  profile,
+  showSaveButton = true,
+  onRegisterSave,
+}: {
+  userId: string;
+  profile: StyleProfile | null;
+  showSaveButton?: boolean;
+  onRegisterSave?: (save: () => Promise<void>) => void;
+}) {
   const queryClient = useQueryClient();
   const [context, setContext] = useState('unspecified');
   const [apparel, setApparel] = useState<Entries>({});
@@ -99,6 +109,11 @@ export function MySizes({ userId, profile }: { userId: string; profile: StylePro
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : 'Could not save size profile'),
   });
+  const { mutateAsync: saveProfile } = saveMutation;
+
+  useEffect(() => {
+    onRegisterSave?.(() => saveProfile().then(() => undefined));
+  }, [onRegisterSave, saveProfile]);
 
   const updateEntry = (key: string, field: keyof Entry, value: string) => setApparel((current) => ({ ...current, [key]: { ...emptyEntry(), ...current[key], [field]: value } }));
   const inputClass = 'h-9 rounded-xl text-xs bg-card/60';
@@ -141,7 +156,7 @@ export function MySizes({ userId, profile }: { userId: string; profile: StylePro
 
         <details className="rounded-xl border border-border/40 p-3"><summary className="cursor-pointer text-xs font-semibold">Brand and accessory sizes</summary><div className="mt-3 space-y-2"><div className="space-y-1"><Label className="text-[10px]">Brand-specific sizes (one per line: brand | category | size)</Label><textarea value={brandSizesText} onChange={(event) => setBrandSizesText(event.target.value)} placeholder="Nike | tops | M" className="min-h-16 w-full rounded-xl border border-input bg-card/60 p-2 text-xs" /></div><div className="space-y-1"><Label className="text-[10px]">Belts, hats, rings, gloves, socks (category: size)</Label><textarea value={accessorySizesText} onChange={(event) => setAccessorySizesText(event.target.value)} placeholder="belt: 85 cm&#10;hat: 58 cm" className="min-h-16 w-full rounded-xl border border-input bg-card/60 p-2 text-xs" /></div></div></details>
 
-        <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} className="w-full rounded-xl"><Save className="mr-2 h-4 w-4" />{saveMutation.isPending ? 'Saving…' : 'Save size profile'}</Button>
+        {showSaveButton && <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} className="w-full rounded-xl"><Save className="mr-2 h-4 w-4" />{saveMutation.isPending ? 'Saving…' : 'Save size profile'}</Button>}
       </CardContent>
     </Card>
   );
