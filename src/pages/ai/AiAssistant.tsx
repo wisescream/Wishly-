@@ -10,15 +10,22 @@ import { sendAiMessage } from '@/lib/api';
 import { FREE_LIMITS } from '@/types/database';
 import type { AiMessage } from '@/types/database';
 import { toast } from 'sonner';
+import { useQuery } from '@tanstack/react-query';
+import { getStyleProfile } from '@/lib/api';
 
 export default function AiAssistant() {
   const { profile } = useAuth();
+  const { data: styleProfile } = useQuery({
+    queryKey: ['style-profile', profile?.id],
+    queryFn: () => (profile?.id ? getStyleProfile(profile.id) : Promise.resolve(null)),
+    enabled: !!profile?.id,
+  });
   const [messages, setMessages] = useState<AiMessage[]>([
     {
       id: 'welcome',
       role: 'assistant',
       content:
-        "Hi! I can help brainstorm gift ideas, compare product features, and narrow your search. I don't have live retailer or inventory access, so use product search to check current listings and prices.",
+        "Hi! I can help brainstorm gift ideas, compare product features, and narrow your search. Fashion suggestions can use the sizes and fit preferences in My Sizes, but I can't guarantee fit or live stock. Use product search to check retailer variants and current offers.",
       timestamp: new Date(),
     },
   ]);
@@ -56,8 +63,8 @@ export default function AiAssistant() {
     setDailyMessagesUsed((c) => c + 1);
 
     try {
-      // Simulate or call AI assistant
-      const res = await sendAiMessage(text, null, messages);
+      const aiSizeContext = styleProfile ? { ...styleProfile, measurements: {} } : null;
+      const res = await sendAiMessage(text, aiSizeContext, messages);
       if (!res?.content) throw new Error('Assistant is unavailable');
 
       const assistantMsg: AiMessage = {

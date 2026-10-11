@@ -11,6 +11,7 @@ import {
   CheckCircle,
   Share2,
   Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import { AppShell } from '@/components/layout/AppShell';
 import { Header } from '@/components/layout/Header';
@@ -21,11 +22,12 @@ import { Input } from '@/components/ui/input';
 import { PriorityBadge } from '@/components/shared/PriorityBadge';
 import { PriceChart } from '@/components/shared/PriceChart';
 import { StoreComparisonTable } from '@/components/shared/StoreComparisonTable';
-import { getItem, updateItem, deleteItem, reserveItem, unreserveItem } from '@/lib/api';
+import { getItem, updateItem, deleteItem, reserveItem, unreserveItem, getStyleProfile } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { type Currency, formatPrice } from '@/lib/currency';
 import { toast } from 'sonner';
+import { supabase } from '@/lib/supabase';
 
 export default function ItemDetail() {
   const { id } = useParams<{ id: string }>();
@@ -42,6 +44,11 @@ export default function ItemDetail() {
     queryKey: ['item-detail', id],
     queryFn: () => (id ? getItem(id) : Promise.resolve(null)),
     enabled: !!id,
+  });
+  const { data: styleProfile } = useQuery({
+    queryKey: ['style-profile', profile?.id],
+    queryFn: () => (profile?.id ? getStyleProfile(profile.id) : Promise.resolve(null)),
+    enabled: !!profile?.id,
   });
 
   React.useEffect(() => {
@@ -76,6 +83,20 @@ export default function ItemDetail() {
       queryClient.invalidateQueries({ queryKey: ['item-detail', id] });
       toast.success('Item updated');
     },
+  });
+
+  const refreshOffersMutation = useMutation({
+    mutationFn: async () => {
+      const { data, error } = await supabase.functions.invoke('refresh-offers', { body: { item_id: id } });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      return data;
+    },
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ['item-detail', id] });
+      toast.success(result?.offers_found ? `Found ${result.offers_found} current provider listing${result.offers_found === 1 ? '' : 's'}` : 'No reliable exact offers found in the configured source');
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : 'Offer search failed. Try again later.'),
   });
 
   const deleteMutation = useMutation({
@@ -325,11 +346,19 @@ export default function ItemDetail() {
 
           {/* Retailer offers */}
           <div className="space-y-2">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-              Available Retailer Offers
-            </h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Retailer Offers</h3>
+              {isOwner && <Button variant="outline" size="sm" onClick={() => refreshOffersMutation.mutate()} disabled={refreshOffersMutation.isPending} className="h-8 rounded-lg text-[10px]">
+                {refreshOffersMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1.5 h-3 w-3" />}
+                {refreshOffersMutation.isPending ? 'Searching…' : 'Refresh offers'}
+              </Button>}
+            </div>
+            {item.enrichment_status === 'partial' && <p className="text-[10px] text-amber-700">The search provider returned partial results. Previously discovered offers remain available and may be stale.</p>}
+            {item.enrichment_status === 'no_matches' && <p className="text-[10px] text-muted-foreground">No reliable exact matches were found in the configured search source yet.</p>}
             <StoreComparisonTable
               offers={displayOffers as any}
+              styleProfile={styleProfile || null}
+              category={item.category}
               currency={(item.currency as Currency) || 'MAD'}
               originalPrice={item.current_price}
               originalCurrency={item.currency as Currency}

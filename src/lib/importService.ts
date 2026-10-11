@@ -305,12 +305,14 @@ export async function saveImportedProductToWishlist(params: {
   // Record the user's original price as an unverified observation.
   if (params.price && params.price > 0) {
     try {
-      await supabase.from("price_points").insert({
-        item_id: newItem.id,
-        price: params.price,
-        store: params.store || "Initial Listing",
-        currency: params.currency || "USD",
-        source: params.priceSource || "user_entered",
+      await supabase.rpc("record_price_observation", {
+        p_item_id: newItem.id,
+        p_price: params.price,
+        p_store: params.store || "Initial Listing",
+        p_currency: params.currency || "USD",
+        p_source: params.priceSource || "user_entered",
+        p_source_url: params.url || null,
+        p_is_verified: false,
       });
     } catch {
       // Non-blocking

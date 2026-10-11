@@ -73,6 +73,14 @@ export interface Database {
           style_tags: string[];
           budget_min: number | null;
           budget_max: number | null;
+          sizing_context: 'mens' | 'womens' | 'unisex_mixed' | 'unspecified';
+          apparel_sizes: Json;
+          shoe_sizes: Json;
+          measurements: Json;
+          fit_preferences: Json;
+          accessory_sizes: Json;
+          brand_sizes: Json;
+          allowed_alternative_sizes: Json;
           created_at: string;
           updated_at: string;
         };
@@ -86,6 +94,14 @@ export interface Database {
           style_tags?: string[];
           budget_min?: number | null;
           budget_max?: number | null;
+          sizing_context?: 'mens' | 'womens' | 'unisex_mixed' | 'unspecified';
+          apparel_sizes?: Json;
+          shoe_sizes?: Json;
+          measurements?: Json;
+          fit_preferences?: Json;
+          accessory_sizes?: Json;
+          brand_sizes?: Json;
+          allowed_alternative_sizes?: Json;
           created_at?: string;
           updated_at?: string;
         };
@@ -97,6 +113,14 @@ export interface Database {
           style_tags?: string[];
           budget_min?: number | null;
           budget_max?: number | null;
+          sizing_context?: 'mens' | 'womens' | 'unisex_mixed' | 'unspecified';
+          apparel_sizes?: Json;
+          shoe_sizes?: Json;
+          measurements?: Json;
+          fit_preferences?: Json;
+          accessory_sizes?: Json;
+          brand_sizes?: Json;
+          allowed_alternative_sizes?: Json;
           updated_at?: string;
         };
         Relationships: [];
@@ -417,6 +441,10 @@ export interface Database {
           currency: string;
           source: string | null;
           offer_id: string | null;
+          availability: string | null;
+          source_url: string | null;
+          is_verified: boolean;
+          observation_day: string;
         };
         Insert: {
           id?: string;
@@ -427,6 +455,10 @@ export interface Database {
           currency?: string;
           source?: string | null;
           offer_id?: string | null;
+          availability?: string | null;
+          source_url?: string | null;
+          is_verified?: boolean;
+          observation_day?: string;
         };
         Update: {};
         Relationships: [];
@@ -463,6 +495,13 @@ export interface Database {
           exchange_rate: number | null;
           exchange_rate_at: string | null;
           last_error: string | null;
+          listing_title: string | null;
+          image_url: string | null;
+          size_label: string | null;
+          size_system: string | null;
+          color_label: string | null;
+          product_match_confidence: number | null;
+          match_type: string | null;
         };
         Insert: {
           id?: string;
@@ -495,6 +534,13 @@ export interface Database {
           exchange_rate?: number | null;
           exchange_rate_at?: string | null;
           last_error?: string | null;
+          listing_title?: string | null;
+          image_url?: string | null;
+          size_label?: string | null;
+          size_system?: string | null;
+          color_label?: string | null;
+          product_match_confidence?: number | null;
+          match_type?: string | null;
         };
         Update: {
           price?: number;
@@ -522,6 +568,13 @@ export interface Database {
           exchange_rate?: number | null;
           exchange_rate_at?: string | null;
           last_error?: string | null;
+          listing_title?: string | null;
+          image_url?: string | null;
+          size_label?: string | null;
+          size_system?: string | null;
+          color_label?: string | null;
+          product_match_confidence?: number | null;
+          match_type?: string | null;
         };
         Relationships: [];
       };
@@ -615,6 +668,21 @@ export interface Database {
       };
       resolve_product_variant: {
         Args: { p_product_id: string; p_name: string };
+        Returns: string | null;
+      };
+      record_price_observation: {
+        Args: {
+          p_item_id: string;
+          p_price: number;
+          p_currency: string;
+          p_store: string;
+          p_source?: string | null;
+          p_offer_id?: string | null;
+          p_source_url?: string | null;
+          p_availability?: string | null;
+          p_is_verified?: boolean;
+          p_recorded_at?: string;
+        };
         Returns: string | null;
       };
     };

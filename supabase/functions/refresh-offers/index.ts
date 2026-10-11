@@ -7,6 +7,16 @@ const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body)
 const currencyFromPrice = (price: string, fallback: string) => /€|\bEUR\b/i.test(price) ? "EUR" : /£|\bGBP\b/i.test(price) ? "GBP" : /د\.م|MAD/i.test(price) ? "MAD" : /¥|\bJPY\b/i.test(price) ? "JPY" : /\bCAD\b/i.test(price) ? "CAD" : /\bAUD\b/i.test(price) ? "AUD" : fallback;
 const normalizedDigits = (value: unknown) => String(value || "").replace(/\D/g, "");
 const variantValue = (title: string, regex: RegExp) => title.match(regex)?.[0]?.replace(/\s/g, "").toLowerCase() || null;
+const sizeVariant = (value: unknown) => {
+  const text = String(value || "");
+  const match = text.match(/\b(US\s*(?:men'?s|women'?s)|EU|UK|CM|MM)\s*[:#-]?\s*(XXS|XS|S|M|L|XL|XXL|\d{1,3}(?:\.\d)?)\b/i)
+    || text.match(/\b(?:shoe\s+)?size\s*[:#-]?\s*(XXS|XS|S|M|L|XL|XXL|\d{1,3}(?:\.\d)?)\b/i)
+    || text.trim().match(/^(XXS|XS|S|M|L|XL|XXL|\d{1,3}(?:\.\d)?)$/i);
+  if (!match) return null;
+  const hasSystem = /^(US|EU|UK|CM|MM)/i.test(match[0]);
+  return { label: (hasSystem ? match[2] : match[1]).toUpperCase(), system: hasSystem ? match[1].replace(/\s+/g, " ").toUpperCase() : null };
+};
+const genderVariant = (value: string) => /\b(?:women'?s|female)\b/i.test(value) ? "women" : /\b(?:men'?s|male)\b/i.test(value) ? "men" : /\bunisex\b/i.test(value) ? "unisex" : null;
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 serve(async (req) => {
@@ -24,7 +34,7 @@ serve(async (req) => {
     if (typeof item_id !== "string") return reply({ error: "Wishlist item id is required." }, 400);
 
     const { data: item } = await userClient.from("items")
-      .select("id,title,brand,model_number,gtin,product_id,variant_id,url,currency,offers_last_checked_at,wishlists!inner(owner_id)")
+      .select("id,title,brand,model_number,gtin,product_id,variant_id,variant_label,category,url,currency,offers_last_checked_at,wishlists!inner(owner_id)")
       .eq("id", item_id).maybeSingle();
     const owner = (item?.wishlists as unknown as { owner_id?: string } | null)?.owner_id;
     if (!item || owner !== userData.user.id) return reply({ error: "Wishlist item not found." }, 404);
@@ -47,13 +57,17 @@ serve(async (req) => {
     const lastChecked = productCache?.offers_last_checked_at || item.offers_last_checked_at;
     if (lastChecked && new Date(lastChecked).getTime() > cutoff) {
       if (item.product_id && productCache?.offer_search_status === "offers_available") {
-        let sharedQuery = admin.from("store_offers").select("item_id,product_id,variant_id,store,price,currency,shipping_cost,taxes,total_price,shipping_known,taxes_known,total_is_estimated,destination_country,seller,condition,availability,delivery_estimate,source,url,affiliate_url,last_verified_at")
+        let sharedQuery = admin.from("store_offers").select("*")
           .eq("product_id", item.product_id).eq("currency", item.currency).gte("last_verified_at", new Date(cutoff).toISOString());
         sharedQuery = item.variant_id ? sharedQuery.eq("variant_id", item.variant_id) : sharedQuery.is("variant_id", null);
         const { data: sharedOffers } = await sharedQuery.limit(20);
         if (sharedOffers?.length) {
-          const copies = sharedOffers.map((offer) => ({ ...offer, item_id: item.id }));
-          await admin.from("store_offers").upsert(copies, { onConflict: "item_id,store" });
+          const copies = sharedOffers.map((offer) => {
+            const copy = { ...offer, item_id: item.id };
+            delete copy.id;
+            return copy;
+          });
+          await admin.from("store_offers").upsert(copies, { onConflict: "item_id,source,url" });
           const count = (await userClient.from("store_offers").select("id", { count: "exact", head: true }).eq("item_id", item.id)).count || 0;
           if (count) return reply({ configured: true, cached: true, status: productCache?.offer_search_status || "partial", offers_found: count });
         }
@@ -62,6 +76,8 @@ serve(async (req) => {
 
     const variant = item.variant_id ? (await userClient.from("product_variants").select("name").eq("id", item.variant_id).maybeSingle()).data?.name : "";
     const productTitle = [item.title, variant].filter(Boolean).join(" ");
+    const targetSize = sizeVariant(item.variant_label) || sizeVariant(variant);
+    const targetGender = genderVariant(productTitle);
     const query = [item.brand, item.model_number, productTitle].filter(Boolean).join(" ").slice(0, 240);
     const searchUrl = new URL("https://serpapi.com/search.json");
     searchUrl.searchParams.set("engine", "google_shopping");
@@ -95,8 +111,13 @@ serve(async (req) => {
       if (targetGtin && rowGtinValues.length && !gtinMatch) return [];
       const candidateCapacity = variantValue(title, /\b\d+\s*(?:gb|tb|mb)\b/i);
       const candidateColor = variantValue(title, /\b(?:black|white|silver|gold|blue|red|green|yellow|purple|pink|midnight|starlight|graphite|natural titanium|desert titanium)\b/i);
+      const rowSizeText = String(row.size || row.extensions?.find?.((value: unknown) => typeof value === "string" && /\b(?:size|shoe\s+size|EU|UK|US|CM|MM)\b/i.test(value)) || "");
+      const candidateSize = sizeVariant(rowSizeText) || sizeVariant(title);
+      const candidateGender = genderVariant(title);
       if (targetCapacity && targetCapacity !== candidateCapacity) return [];
       if (targetColor && targetColor !== candidateColor) return [];
+      if (targetGender && candidateGender && targetGender !== candidateGender) return [];
+      if (targetSize && (!candidateSize || targetSize.label !== candidateSize.label || (targetSize.system && candidateSize.system && targetSize.system !== candidateSize.system))) return [];
       if (/\b(used|refurbished|renewed|open box|pre-owned|replacement|compatible|case for|cover for)\b/i.test(title)) return [];
       const price = Number(row.extracted_price);
       const oldPriceRaw = row.extracted_old_price ?? (typeof row.old_price === "number" ? row.old_price : null);
@@ -107,9 +128,13 @@ serve(async (req) => {
       const originalPrice = Number(oldPriceNormalized);
       const offerUrl = typeof row.link === "string" ? row.link : "";
       if (!Number.isFinite(price) || price <= 0 || !/^https?:\/\//i.test(offerUrl)) return [];
+      const sizeInfo = candidateSize;
       return [{
         item_id: item.id, product_id: item.product_id, variant_id: item.variant_id,
         store: String(row.source || "Retailer").slice(0, 120), seller: String(row.source || "Retailer").slice(0, 120),
+          listing_title: title, image_url: typeof row.thumbnail === "string" ? row.thumbnail : null,
+          size_label: sizeInfo?.label || null, size_system: sizeInfo?.system || null, color_label: candidateColor,
+          product_match_confidence: gtinMatch ? 1 : 0.9, match_type: gtinMatch ? "gtin" : "brand_model_variant",
           price, currency: currencyFromPrice(String(row.price || ""), market.currency), url: offerUrl,
         original_price: Number.isFinite(originalPrice) && originalPrice > price ? originalPrice : null,
         discount_percent: Number.isFinite(originalPrice) && originalPrice > price ? Math.round((1 - price / originalPrice) * 100) : null,
@@ -121,12 +146,16 @@ serve(async (req) => {
     }).slice(0, 8);
 
     if (offerRows.length) {
-      const { data: saved, error } = await admin.from("store_offers").upsert(offerRows, { onConflict: "item_id,store" }).select("id,store,price,currency,source");
+      const { data: saved, error } = await admin.from("store_offers").upsert(offerRows, { onConflict: "item_id,source,url" }).select("id,store,price,currency,source,url,availability,last_verified_at");
       if (error) throw error;
       if (saved?.length) {
         const comparableHistory = saved.filter((offer) => offer.currency === item.currency);
         if (comparableHistory.length) {
-          await admin.from("price_points").insert(comparableHistory.map((offer) => ({ item_id: item.id, offer_id: offer.id, price: offer.price, store: offer.store, currency: offer.currency, source: offer.source })));
+          await Promise.all(comparableHistory.map((offer) => admin.rpc("record_price_observation", {
+            p_item_id: item.id, p_offer_id: offer.id, p_price: offer.price, p_store: offer.store,
+            p_currency: offer.currency, p_source: offer.source, p_source_url: offer.url,
+            p_availability: offer.availability, p_is_verified: false, p_recorded_at: offer.last_verified_at,
+          })));
         }
       }
     }

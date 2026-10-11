@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { ListCard } from '@/components/shared/ListCard';
+import { MySizes } from '@/components/profile/MySizes';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { getWishlists, getStyleProfile, signOut } from '@/lib/api';
@@ -118,7 +119,7 @@ export default function Profile() {
             </div>
           </div>
 
-          {/* Style & Fit Profile Section */}
+          {/* Style & Fit Profile Summary */}
           <Card className="rounded-3xl glass-card border border-border/50 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -141,13 +142,13 @@ export default function Profile() {
               <div className="p-2.5 rounded-xl bg-card/40 border border-border/40">
                 <span className="text-[10px] text-muted-foreground block">Top & Bottom</span>
                 <strong className="text-foreground">
-                  {(styleProfile?.clothing_sizes as any)?.top || 'M'}
+                  {(styleProfile?.apparel_sizes as any)?.tops?.preferred || (styleProfile?.apparel_sizes as any)?.tops?.actual || 'Not set'}
                 </strong>
               </div>
               <div className="p-2.5 rounded-xl bg-card/40 border border-border/40">
                 <span className="text-[10px] text-muted-foreground block">Shoe Size</span>
                 <strong className="text-foreground">
-                  EU {styleProfile?.shoe_size || '40'}
+                  {(styleProfile?.shoe_sizes as any)?.preferred?.value || (styleProfile?.shoe_sizes as any)?.actual?.value || styleProfile?.shoe_size || 'Not set'}
                 </strong>
               </div>
             </div>
@@ -171,6 +172,8 @@ export default function Profile() {
               </div>
             )}
           </Card>
+
+          {profile?.id && <MySizes userId={profile.id} profile={styleProfile || null} />}
 
           {/* My Wishlists Section */}
           <div className="space-y-3">

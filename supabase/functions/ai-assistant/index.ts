@@ -25,7 +25,20 @@ serve(async (req) => {
       });
     }
 
-    const systemPrompt = `You are Wishly's shopping and gift-planning assistant. Help users brainstorm product types, compare features, and refine what to search for. You do not have live retailer or inventory access. Never invent product listings, prices, stock, sellers, ratings, delivery, or retailer URLs. When a user wants to buy a specific item, direct them to Wishly's product search to check connected sources. Treat the user's budget as guidance, not a current price quote. Style context: ${JSON.stringify(styleProfile || {})}`;
+    const safeStyle = styleProfile && typeof styleProfile === "object" ? {
+      sizing_context: styleProfile.sizing_context,
+      apparel_sizes: styleProfile.apparel_sizes,
+      shoe_sizes: styleProfile.shoe_sizes,
+      fit_preferences: styleProfile.fit_preferences,
+      accessory_sizes: styleProfile.accessory_sizes,
+      brand_sizes: styleProfile.brand_sizes,
+      style_tags: styleProfile.style_tags,
+      brands: styleProfile.brands,
+      colors: styleProfile.colors,
+      budget_min: styleProfile.budget_min,
+      budget_max: styleProfile.budget_max,
+    } : {};
+    const systemPrompt = `You are Wishly's shopping and gift-planning assistant. Help users brainstorm product types, compare features, and refine what to search for. For fashion suggestions, use the user's actual size, preferred size, allowed alternatives, and preferred fit as distinct preferences. Respect men's, women's, and unisex sizing contexts; men's and women's shoe sizes are not interchangeable. Never convert sizes with a universal rule when a manufacturer chart is unavailable. If size or fit evidence is missing, say so and recommend checking the brand chart; never claim a fit or stock match. You do not have live retailer or inventory access. Never invent product listings, prices, stock, sellers, ratings, delivery, or retailer URLs. When a user wants to buy a specific item, direct them to Wishly's product search to check connected sources. Treat the user's budget as guidance, not a current price quote. Measurements are private and intentionally excluded. Size and style context: ${JSON.stringify(safeStyle).slice(0, 8000)}`;
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",

@@ -3,12 +3,16 @@ import { ExternalLink } from 'lucide-react';
 import type { StoreOffer } from '@/types/database';
 import { type Currency, formatPrice } from '@/lib/currency';
 import { Button } from '@/components/ui/button';
+import type { StyleProfile } from '@/types/database';
+import { getOfferSizeMatch, getSizeRecommendationLabel } from '@/lib/fashionSizes';
 
 interface StoreComparisonTableProps {
   offers: StoreOffer[];
   currency?: Currency;
   originalPrice?: number | null;
   originalCurrency?: Currency;
+  styleProfile?: StyleProfile | null;
+  category?: string | null;
   className?: string;
 }
 
@@ -17,6 +21,8 @@ export function StoreComparisonTable({
   currency = 'MAD',
   originalPrice = null,
   originalCurrency = currency,
+  styleProfile = null,
+  category = null,
   className,
 }: StoreComparisonTableProps) {
   if (!offers || offers.length === 0) {
@@ -38,7 +44,11 @@ export function StoreComparisonTable({
   const lowestListing = offers.filter((offer) => isFresh(offer) && comparable(offer)).sort((a, b) => rankedValue(a) - rankedValue(b))[0] || null;
   const headline = best || lowestListing;
   const savings = headline && originalPrice != null && originalPrice > headline.price ? originalPrice - headline.price : 0;
+  const sizeRank = { match: 0, possible: 1, unknown: 2, no_match: 3 } as const;
   const sortedOffers = [...offers].sort((a, b) => {
+    const sizeA = sizeRank[getOfferSizeMatch(styleProfile, category, a.size_label, a.size_system)];
+    const sizeB = sizeRank[getOfferSizeMatch(styleProfile, category, b.size_label, b.size_system)];
+    if (sizeA !== sizeB) return sizeA - sizeB;
     const aReady = isFresh(a) && comparable(a) && a.total_price != null && !a.total_is_estimated;
     const bReady = isFresh(b) && comparable(b) && b.total_price != null && !b.total_is_estimated;
     if (aReady !== bReady) return aReady ? -1 : 1;
@@ -62,6 +72,7 @@ export function StoreComparisonTable({
           const availability = (offer.availability || 'unknown').replace(/_/g, ' ');
           const sameCurrency = comparable(offer);
           const knownTotal = offer.total_price != null && !offer.total_is_estimated;
+          const sizeMatch = getOfferSizeMatch(styleProfile, category, offer.size_label, offer.size_system);
 
           return (
             <div
@@ -69,7 +80,7 @@ export function StoreComparisonTable({
               className="flex items-center justify-between p-3 hover:bg-white/[0.02] transition-colors"
             >
               <div className="flex items-center gap-3">
-                <span className="text-xl">🏬</span>
+                {offer.image_url ? <img src={offer.image_url} alt="" className="h-10 w-10 rounded-lg object-contain bg-white/70" loading="lazy" /> : <span className="text-xl">🏬</span>}
                 <div>
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs font-semibold text-foreground">
@@ -79,6 +90,10 @@ export function StoreComparisonTable({
                   <span className="text-[10px] text-muted-foreground">
                     {offer.condition || 'condition unknown'} · {availability}{isStale ? ' · stale provider result' : ` · provider checked ${new Date(offer.last_verified_at).toLocaleDateString()}`}
                   </span>
+                  {offer.listing_title && <span className="block max-w-52 text-[10px] text-muted-foreground line-clamp-2">{offer.listing_title}</span>}
+                  {offer.size_label && <span className="block text-[10px] text-muted-foreground">Size {offer.size_label}</span>}
+                  {styleProfile && category && <span className={`block text-[10px] ${sizeMatch === 'match' ? 'text-emerald-600' : 'text-muted-foreground'}`}>{getSizeRecommendationLabel(sizeMatch)}</span>}
+                  <span className="block text-[10px] text-muted-foreground">{offer.shipping_known ? `Shipping ${formatPrice(Number(offer.shipping_cost || 0), offer.currency || currency)}` : 'Shipping unknown'}{offer.taxes_known ? ` · taxes ${formatPrice(Number(offer.taxes || 0), offer.currency || currency)}` : ' · taxes unknown'}</span>
                 </div>
               </div>
 

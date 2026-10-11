@@ -24,8 +24,8 @@ export default function Onboarding() {
 
   // Profile preferences state
   const [country, setCountry] = useState('MA');
-  const [clothingSize, setClothingSize] = useState('M');
-  const [shoeSize, setShoeSize] = useState('40');
+  const [clothingSize, setClothingSize] = useState('__unset');
+  const [shoeSize, setShoeSize] = useState('__unset');
   const [selectedTags, setSelectedTags] = useState<string[]>(['Casual', 'Chic']);
 
   const isLastSlide = slideIndex >= ONBOARDING_SLIDES.length;
@@ -44,8 +44,8 @@ export default function Onboarding() {
       });
 
       await upsertStyleProfile(user.id, {
-        clothing_sizes: { top: clothingSize, bottom: clothingSize },
-        shoe_size: shoeSize,
+        ...(clothingSize !== '__unset' ? { clothing_sizes: { top: clothingSize, bottom: clothingSize } } : {}),
+        ...(shoeSize !== '__unset' ? { shoe_size: shoeSize } : {}),
         style_tags: selectedTags,
       });
     }
@@ -108,6 +108,7 @@ export default function Onboarding() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="__unset" className="text-xs">Prefer not to specify</SelectItem>
                       {COUNTRIES.map((c) => (
                         <SelectItem key={c.code} value={c.code} className="text-xs">
                           {c.flag} {c.name}
@@ -124,6 +125,7 @@ export default function Onboarding() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="__unset" className="text-xs">Prefer not to specify</SelectItem>
                       {Object.values(CURRENCIES).map((c) => (
                         <SelectItem key={c.code} value={c.code} className="text-xs">
                           {c.flag} {c.code} ({c.symbol})
