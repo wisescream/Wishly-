@@ -105,6 +105,7 @@ export function MySizes({
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['style-profile', userId] });
+      await queryClient.invalidateQueries({ queryKey: ['discover-personalized', userId] });
       toast.success('Size profile saved');
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : 'Could not save size profile'),

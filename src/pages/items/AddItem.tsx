@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Barcode, ImagePlus, Link2, Loader2, Search, Sparkles } from 'lucide-react';
@@ -46,8 +46,9 @@ export default function AddItem() {
   const queryClient = useQueryClient();
   const { profile } = useAuth();
   const [searchParams] = useSearchParams();
+  const initialSearchQuery = searchParams.get('search') || '';
   const preselectedListId = searchParams.get('list');
-  const [mode, setMode] = useState<ImportMode>('url');
+  const [mode, setMode] = useState<ImportMode>(initialSearchQuery ? 'search' : 'url');
   const [wishlistId, setWishlistId] = useState(preselectedListId || '');
   const [title, setTitle] = useState('');
   const [brand, setBrand] = useState('');
@@ -70,7 +71,7 @@ export default function AddItem() {
   const [notes, setNotes] = useState('');
   const [targetPrice, setTargetPrice] = useState('');
   const [urlInput, setUrlInput] = useState('');
-  const [searchInput, setSearchInput] = useState('');
+  const [searchInput, setSearchInput] = useState(initialSearchQuery);
   const [barcodeInput, setBarcodeInput] = useState('');
   const [candidates, setCandidates] = useState<ProductCandidate[]>([]);
   const [busy, setBusy] = useState(false);
@@ -79,6 +80,7 @@ export default function AddItem() {
   const [ocrText, setOcrText] = useState('');
   const [observedPrice, setObservedPrice] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const autoSearchRef = useRef<string | null>(null);
 
   const { data: wishlists = [] } = useQuery({
     queryKey: ['my-wishlists', profile?.id],
@@ -196,7 +198,7 @@ export default function AddItem() {
     } finally { setBusy(false); }
   };
 
-  const handleSearch = async (query = searchInput) => {
+  const handleSearch = useCallback(async (query = searchInput) => {
     setBusy(true);
     setCandidates([]);
     try {
@@ -205,7 +207,16 @@ export default function AddItem() {
       if (!found.length) toast.info('No product candidates found. Add details manually or configure the shopping search provider.');
     } catch { toast.error('Product search is unavailable. You can still add the product manually.'); }
     finally { setBusy(false); }
-  };
+  }, [searchInput]);
+
+  useEffect(() => {
+    const query = searchParams.get('search')?.trim();
+    if (!query || autoSearchRef.current === query) return;
+    autoSearchRef.current = query;
+    setMode('search');
+    setSearchInput(query);
+    void handleSearch(query);
+  }, [handleSearch, searchParams]);
 
   const handleImage = async (file?: File) => {
     if (!file) return;
@@ -267,6 +278,7 @@ export default function AddItem() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['wishlist-detail', wishlistId] });
+      queryClient.invalidateQueries({ queryKey: ['discover-personalized', profile?.id] });
       toast.success('Product saved. Wishly will show available matches from configured sources.');
       navigate(`/wishlists/${wishlistId}`);
     },

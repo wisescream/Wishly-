@@ -106,6 +106,21 @@ export async function getWishlists(userId: string): Promise<Wishlist[]> {
   return data ?? [];
 }
 
+export async function getMyWishlistItems(userId: string): Promise<Item[]> {
+  const wishlists = await getWishlists(userId);
+  const wishlistIds = wishlists.map((wishlist) => wishlist.id);
+  if (wishlistIds.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("items")
+    .select("*")
+    .in("wishlist_id", wishlistIds)
+    .order("created_at", { ascending: false })
+    .limit(100);
+  if (error) throw error;
+  return data ?? [];
+}
+
 export async function getWishlistWithItems(wishlistId: string): Promise<WishlistWithItems | null> {
   const { data: wishlist } = await supabase
     .from("wishlists")

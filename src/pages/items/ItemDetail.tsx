@@ -69,7 +69,7 @@ export default function ItemDetail() {
     offers_available: 'Offers found from configured sources.',
     manual_confirmation: 'Review needed to confirm the exact product.',
     partial: 'Partial results. Some product or offer details could not be verified.',
-    no_matches: 'No reliable exact offer match found in configured sources.',
+    no_matches: 'No exact retailer match found in the configured search sources yet.',
     failed: 'Offer search failed. The wishlist item is still saved.',
     manual: 'Manually entered product. Offer search needs a reliable model or identifier.',
   };
@@ -94,8 +94,10 @@ export default function ItemDetail() {
     },
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ['item-detail', id] });
-      if (result?.status === 'partial') toast.error(result.error || 'The search provider is temporarily unavailable. Previously saved offers are unchanged.');
-      else toast.success(result?.offers_found ? `Found ${result.offers_found} provider listing${result.offers_found === 1 ? '' : 's'}` : 'No reliable exact offers found in the configured source');
+      if (result?.status === 'partial' && result?.offers_found) toast.message(result.error || `Found ${result.offers_found} possible retailer listing${result.offers_found === 1 ? '' : 's'}. Check the exact model and price on the retailer page.`);
+      else if (result?.error) toast.error(result.error);
+      else if (result?.exact_offers_found) toast.success(`Found ${result.exact_offers_found} high-confidence retailer match${result.exact_offers_found === 1 ? '' : 'es'}`);
+      else toast.message('No exact retailer match found yet. Wishly searched the configured sources; you can retry later.');
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : 'Offer search failed. Try again later.'),
   });
