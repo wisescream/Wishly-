@@ -1,0 +1,32 @@
+{
+  "name": "Wishly",
+  "short_name": "Wishly",
+  "description": "Smart Social Wishlists with AI Shopping",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#7c3aed",
+  "background_color": "#0f0a1a",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "categories": ["shopping", "social", "lifestyle"],
+  "lang": "en",
+  "dir": "ltr",
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "My Wishlists",
+      "short_name": "Wishlists",
+      "url": "/wishlists",
+      "icons": []
+    },
+    {
+      "name": "Explore",
+      "short_name": "Explore",
+      "url": "/explore",
+      "icons": []
+    }
+  ]
+}
