@@ -41,6 +41,20 @@ jobs:
         run: |
           sh run-migrations.sh
 
+      - name: Set up Supabase CLI for Edge Functions
+        if: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' }}
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy offer refresh Edge Function
+        if: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_ID || 'pjpyfupkaubencuxnjyf' }}
+        run: |
+          supabase functions deploy refresh-offers --project-ref "$PROJECT_REF" --use-api
+
       - name: Run Migrations via Supabase CLI (Fallback if DB Password provided)
         if: ${{ secrets.SUPABASE_ACCESS_TOKEN == '' && secrets.SUPABASE_DB_PASSWORD != '' }}
         uses: supabase/setup-cli@v1

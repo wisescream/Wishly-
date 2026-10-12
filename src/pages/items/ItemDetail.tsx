@@ -27,7 +27,6 @@ import { type Currency, formatPrice } from '@/lib/currency';
 import { formatProductCondition } from '@/lib/productCondition';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
-import { refreshOffersForItem } from '@/lib/importService';
 
 export default function ItemDetail() {
   const { id } = useParams<{ id: string }>();
@@ -95,15 +94,26 @@ export default function ItemDetail() {
 
   const refreshOffersMutation = useMutation({
     mutationFn: async () => {
-      const offers = await refreshOffersForItem(id!);
-      return { success: true, offers_found: offers.length, exact_offers_found: offers.length };
+      const { data, error } = await supabase.functions.invoke('refresh-offers', {
+        body: { item_id: id, force_refresh: true },
+      });
+      if (error) throw await getFunctionError(error, 'Offer search could not reach its providers.');
+      if (data?.error && !data?.status) throw new Error(data.error);
+      return data as {
+        offers_found: number;
+        exact_offers_found: number;
+        possible_offers_found?: number;
+        error?: string | null;
+      };
     },
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ['item-detail', id] });
-      if (result.offers_found > 0) {
-        toast.success(`Found ${result.offers_found} matching offers across Moroccan & international stores.`);
+      if (result.exact_offers_found > 0) {
+        toast.success(`Found ${result.exact_offers_found} verified retailer offer${result.exact_offers_found === 1 ? '' : 's'}.`);
+      } else if (result.offers_found > 0) {
+        toast.info(`Found ${result.possible_offers_found ?? result.offers_found} possible retailer listing${result.offers_found === 1 ? '' : 's'}. Check the product and price before buying.`);
       } else {
-        toast.info('No new retailer offers found. You can try again later.');
+        toast.info(result.error || 'No retailer matches were found. Try again later.');
       }
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : 'Offer search failed. Try again later.'),

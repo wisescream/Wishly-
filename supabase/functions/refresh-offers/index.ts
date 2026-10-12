@@ -399,13 +399,19 @@ serve(async (req) => {
       ? null
       : possibleOfferCount
         ? `Found ${possibleOfferCount} retailer-search result${possibleOfferCount === 1 ? "" : "s"}, but none has been confirmed on its product page yet.`
-        : shoppingBudgetReached && shoppingSearchError
+        : shoppingBudgetReached && !openRouterKey && shoppingSearchError
           ? shoppingSearchError
-        : !openRouterKey && apiKey
-          ? "No strong match was found in Google Shopping. Add OPENROUTER_API_KEY to Supabase Edge Function secrets to enable broader web search."
-          : !openRouterKey && !apiKey
-            ? "No search provider is configured. Add SERPAPI_KEY for Google Shopping and OPENROUTER_API_KEY for broader web search."
-            : openRouterSearchError || shoppingSearchError || "No exact retailer listing was found in the configured Google Shopping and web search sources.";
+        : openRouterSearchError || (openRouterSearchAttempted
+          ? shoppingSearchError
+            ? `Web search did not find a verifiable retailer price. Google Shopping: ${shoppingSearchError}`
+            : "Web search found no retailer listing with a verifiable price."
+          : !openRouterKey && apiKey
+            ? shoppingFailures
+              ? shoppingSearchError || "Google Shopping could not complete this search."
+              : "No strong match was found in Google Shopping. Add OPENROUTER_API_KEY to Supabase Edge Function secrets to enable broader web search."
+            : !openRouterKey && !apiKey
+              ? "No search provider is configured. Add SERPAPI_KEY for Google Shopping and OPENROUTER_API_KEY for broader web search."
+              : shoppingSearchError || "No exact retailer listing was found in the configured search sources.");
     await admin.from("items").update({ enrichment_status: status, offers_last_checked_at: stamp, enrichment_error: errorMessage }).eq("id", item.id);
     const refreshIntervalHours = item.target_price != null ? 2 : 6;
     await admin.from("items").update({
