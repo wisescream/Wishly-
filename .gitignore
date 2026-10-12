@@ -31,7 +31,6 @@ dist-ssr
 .env.production.local
 
 # Local deployment helpers that may read ignored .env credentials
-deploy-vercel.sh
 sync-keys.sh
 .vercel
 .env*
