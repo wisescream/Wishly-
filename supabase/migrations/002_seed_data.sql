@@ -53,11 +53,21 @@ VALUES
   ('11111111-1111-1111-1111-111111111111', '33333333-3333-3333-3333-333333333333', 'pending');
 
 -- Price Points (History)
-INSERT INTO price_points (item_id, price, store, recorded_at)
-VALUES
-  ('d2222222-2222-2222-2222-222222222221', 4200.00, 'Electroplanet', now() - interval '60 days'),
-  ('d2222222-2222-2222-2222-222222222221', 4100.00, 'Electroplanet', now() - interval '30 days'),
-  ('d2222222-2222-2222-2222-222222222221', 3999.00, 'Electroplanet', now() - interval '5 days');
+INSERT INTO price_points (item_id, price, store, recorded_at, observation_day)
+SELECT seed.item_id, seed.price, seed.store, seed.recorded_at,
+       (seed.recorded_at AT TIME ZONE 'UTC')::date
+FROM (VALUES
+  ('d2222222-2222-2222-2222-222222222221'::uuid, 4200.00::numeric, 'Electroplanet'::text, now() - interval '60 days'),
+  ('d2222222-2222-2222-2222-222222222221'::uuid, 4100.00::numeric, 'Electroplanet'::text, now() - interval '30 days'),
+  ('d2222222-2222-2222-2222-222222222221'::uuid, 3999.00::numeric, 'Electroplanet'::text, now() - interval '5 days')
+) AS seed(item_id, price, store, recorded_at)
+WHERE NOT EXISTS (
+  SELECT 1 FROM price_points existing
+  WHERE existing.item_id = seed.item_id
+    AND existing.price = seed.price
+    AND existing.store IS NOT DISTINCT FROM seed.store
+    AND existing.observation_day = (seed.recorded_at AT TIME ZONE 'UTC')::date
+);
 
 -- Store Offers
 INSERT INTO store_offers (item_id, store, price, url)
