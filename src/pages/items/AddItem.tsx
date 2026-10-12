@@ -11,7 +11,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { PRIORITIES } from '@/lib/constants';
-import { CURRENCIES, type Currency } from '@/lib/currency';
+import { CURRENCIES, isSupportedCurrency, type Currency } from '@/lib/currency';
+import { normalizeProductCondition, type ProductCondition } from '@/lib/productCondition';
 import { getWishlists } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
@@ -24,7 +25,7 @@ import {
   isValidGtin,
   saveImportedProductToWishlist,
 } from '@/lib/importService';
-import type { ProductCandidate } from '@/types/database';
+import type { FetchedProduct, ProductCandidate } from '@/types/database';
 
 type ImportMode = 'url' | 'search' | 'image' | 'barcode' | 'manual';
 const modes: Array<{ id: ImportMode; label: string; icon: React.ElementType }> = [
@@ -56,7 +57,9 @@ export default function AddItem() {
   const [gtin, setGtin] = useState('');
   const [productVerified, setProductVerified] = useState(false);
   const [variant, setVariant] = useState('');
+  const [condition, setCondition] = useState<ProductCondition>('unknown');
   const [variantDetails, setVariantDetails] = useState<{ color?: string; size?: string; capacity?: string; sku?: string }>({});
+  const [availableVariants, setAvailableVariants] = useState<NonNullable<FetchedProduct['variants']>>([]);
   const [imageUrl, setImageUrl] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
@@ -79,6 +82,7 @@ export default function AddItem() {
   const [previewUrl, setPreviewUrl] = useState('');
   const [ocrText, setOcrText] = useState('');
   const [observedPrice, setObservedPrice] = useState<number | null>(null);
+  const [priceCurrencyAmbiguous, setPriceCurrencyAmbiguous] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const autoSearchRef = useRef<string | null>(null);
 
@@ -140,6 +144,10 @@ export default function AddItem() {
   }, [scanActive]);
 
   const fillFromCandidate = async (candidate: ProductCandidate) => {
+    setPriceCurrencyAmbiguous(false);
+    setPrice('');
+    setPriceSource('user_entered');
+    setOriginalPrice('');
     setTitle(candidate.title);
     setBrand(candidate.brand || '');
     setModel(candidate.model_number || '');
@@ -150,27 +158,55 @@ export default function AddItem() {
     setDescription(candidate.description || '');
     setCategory('');
     setVariant('');
+    setCondition(normalizeProductCondition(candidate.condition || candidate.title));
     setVariantDetails({});
+    setAvailableVariants([]);
     setProductUrl(candidate.url || productUrl);
     setStore(candidate.store || store);
-    if (candidate.gtin && candidate.confidence >= 0.99 && candidate.price && candidate.price > 0) {
+    const candidateCurrency = candidate.currency?.toUpperCase();
+    const candidateCurrencySupported = isSupportedCurrency(candidateCurrency);
+    if (candidate.gtin && candidate.confidence >= 0.99 && candidate.price && candidate.price > 0 && candidateCurrencySupported) {
       setPrice(String(candidate.price));
       setPriceSource('barcode_catalog');
     }
-    if (candidate.currency && Object.prototype.hasOwnProperty.call(CURRENCIES, candidate.currency)) setCurrency(candidate.currency as Currency);
+    if (candidateCurrencySupported) setCurrency(candidateCurrency);
     setCandidates([]);
-    toast.success('Product selected. Wishly will search configured offer sources after you save it.');
+    if (candidate.price && !candidateCurrencySupported) toast.info('Product selected. Its price has no supported currency, so the price was left blank.');
+    else toast.success('Product selected. Wishly will search configured offer sources after you save it.');
+  };
+
+  const selectImportedVariant = (selected: NonNullable<FetchedProduct['variants']>[number]) => {
+    setVariant(selected.name);
+    setVariantDetails({
+      ...(selected.color ? { color: selected.color } : {}),
+      ...(selected.size ? { size: selected.size } : {}),
+      ...(selected.capacity ? { capacity: selected.capacity } : {}),
+      ...(selected.sku ? { sku: selected.sku } : {}),
+    });
+    setGtin(selected.gtin || '');
+    setProductVerified(Boolean(selected.gtin && isValidGtin(selected.gtin.replace(/\D/g, ''))));
+    setPrice(selected.price && selected.price > 0 ? String(selected.price) : '');
+    setPriceSource(selected.price && selected.price > 0 ? 'retailer_page' : 'user_entered');
+    setOriginalPrice('');
+    if (selected.image_url) setImageUrl(selected.image_url);
   };
 
   const handleUrlImport = async () => {
     setBusy(true);
-    setTitle(''); setBrand(''); setModel(''); setGtin(''); setVariant(''); setVariantDetails({});
+    setCandidates([]);
+    setPriceCurrencyAmbiguous(false);
+    setTitle(''); setBrand(''); setModel(''); setGtin(''); setVariant(''); setVariantDetails({}); setAvailableVariants([]);
+    setCondition('unknown');
     setImageUrl(''); setAdditionalImages([]); setDescription(''); setCategory('');
     setPrice(''); setPriceSource('retailer_page'); setStore(''); setProductVerified(false);
     setOriginalPrice('');
     try {
       const result = await importFromUrl(urlInput.trim());
+      const pageCurrency = result.product.currency.toUpperCase();
+      const pageCurrencySupported = isSupportedCurrency(pageCurrency);
       setTitle(result.product.title);
+      setPriceSource(result.product.price && result.product.price > 0 && pageCurrencySupported ? 'retailer_page' : 'user_entered');
+      setCandidates(result.candidates);
       setBrand(result.product.brand || '');
       setModel(result.product.model_number || '');
       setGtin(result.product.gtin || '');
@@ -180,16 +216,27 @@ export default function AddItem() {
       setDescription(result.product.description || '');
       setCategory(result.product.category || '');
       setVariant(result.product.variant_name || '');
+      setCondition(normalizeProductCondition(result.product.condition));
       setVariantDetails(result.product.variant_details || {});
-      setProductUrl(urlInput.trim());
+      const importedVariants = result.product.variants || [];
+      setAvailableVariants(pageCurrencySupported ? importedVariants : importedVariants.map((option) => ({ ...option, price: undefined })));
+      setProductUrl(result.product.canonical_url || urlInput.trim());
       setStore(result.product.store || '');
-      if (result.product.price && result.product.price > 0 && result.product.currency) {
+      if (result.product.price && result.product.price > 0 && pageCurrencySupported) {
         setPrice(String(result.product.price));
         setPriceSource('retailer_page');
       }
-      setOriginalPrice(result.product.original_price ? String(result.product.original_price) : '');
-      if (Object.prototype.hasOwnProperty.call(CURRENCIES, result.product.currency)) setCurrency(result.product.currency as Currency);
-      if (result.message) toast.info(result.message);
+      setOriginalPrice(pageCurrencySupported && result.product.original_price ? String(result.product.original_price) : '');
+      if (pageCurrencySupported) setCurrency(pageCurrency);
+      const notices = [
+        result.message,
+        result.product.price && !pageCurrencySupported
+          ? result.product.currency
+            ? 'The page price uses a currency Wishly does not support yet, so it was left blank.'
+            : 'The page did not identify the price currency, so the price was left blank.'
+          : null,
+      ].filter(Boolean);
+      if (notices.length) toast.info(notices.join(' '));
       else toast.success('Product details imported. Review them below; offer discovery will continue after saving.');
     } catch (error) {
       setProductUrl(urlInput.trim());
@@ -221,20 +268,27 @@ export default function AddItem() {
   const handleImage = async (file?: File) => {
     if (!file) return;
     setBusy(true);
-    setTitle(''); setBrand(''); setModel(''); setGtin(''); setVariant(''); setVariantDetails({});
+    setCandidates([]);
+    setOcrText('');
+    setObservedPrice(null);
+    setPriceCurrencyAmbiguous(false);
+    setTitle(''); setBrand(''); setModel(''); setGtin(''); setVariant(''); setVariantDetails({}); setAvailableVariants([]);
     setImageUrl(''); setAdditionalImages([]); setDescription(''); setCategory('');
     setPrice(''); setPriceSource('user_entered'); setStore(''); setProductVerified(false);
     setOriginalPrice('');
+    setPriceCurrencyAmbiguous(false);
     try {
       const result = await importFromImage(file);
       setPreviewUrl((old) => { if (old) URL.revokeObjectURL(old); return result.previewUrl; });
       setOcrText(result.detectedText);
       setObservedPrice(result.observedPrice);
+      setPriceCurrencyAmbiguous(result.priceCurrencyAmbiguous);
       if (result.observedPrice) {
         setPrice(String(result.observedPrice));
         setPriceSource('image_ocr');
         if (Object.prototype.hasOwnProperty.call(CURRENCIES, result.observedCurrency)) setCurrency(result.observedCurrency as Currency);
       }
+      if (result.priceCurrencyAmbiguous) toast.info('Price text was found, but its currency symbol is ambiguous. Wishly left the price blank; enter it after confirming the currency.');
       if (result.detectedText) setSearchInput(result.detectedText.slice(0, 200));
       setCandidates(result.candidates);
       if (!result.detectedText) toast.info('Image loaded. OCR is unavailable in this browser; search by name or enter details manually.');
@@ -260,7 +314,7 @@ export default function AddItem() {
     mutationFn: async () => {
       if (!wishlistId) throw new Error('Please select a wishlist');
       if (!title.trim()) throw new Error('Product name is required');
-      const itemId = await saveImportedProductToWishlist({
+      const saved = await saveImportedProductToWishlist({
         wishlistId, title: title.trim(), imageUrl: imageUrl || null, additionalImages,
         url: productUrl || urlInput || null, store: store || null,
         price: price ? Number(price) : null, originalPrice: originalPrice ? Number(originalPrice) : null, currency, brand: brand || null,
@@ -269,17 +323,21 @@ export default function AddItem() {
         isVerified: productVerified, priceSource,
         description: description || null, category: category || null,
         variantDetails,
+        condition,
       });
       // Fire-and-forget monitoring so wishlist persistence is immediate.
-      void supabase.functions.invoke('refresh-offers', { body: { item_id: itemId } })
-        .then(() => queryClient.invalidateQueries({ queryKey: ['item-detail', itemId] }))
-        .catch(() => undefined);
-      return itemId;
+      if (!saved.isDuplicate) {
+        void supabase.functions.invoke('refresh-offers', { body: { item_id: saved.itemId } })
+          .then(() => queryClient.invalidateQueries({ queryKey: ['item-detail', saved.itemId] }))
+          .catch(() => undefined);
+      }
+      return saved;
     },
-    onSuccess: () => {
+    onSuccess: (saved) => {
       queryClient.invalidateQueries({ queryKey: ['wishlist-detail', wishlistId] });
       queryClient.invalidateQueries({ queryKey: ['discover-personalized', profile?.id] });
-      toast.success('Product saved. Wishly will show available matches from configured sources.');
+      if (saved.isDuplicate) toast.info('This product is already in this wishlist. The existing item was kept.');
+      else toast.success('Product saved. Wishly will show available matches from configured sources.');
       navigate(`/wishlists/${wishlistId}`);
     },
     onError: (err: Error) => toast.error(err.message || 'Could not save product'),
@@ -320,6 +378,7 @@ export default function AddItem() {
             {busy && <p className="text-xs text-muted-foreground" role="status">Reading visible text and searching visual product matches…</p>}
             {ocrText && <p className="text-xs text-muted-foreground">Read from image: {ocrText}</p>}
             {observedPrice && <p className="text-xs text-amber-600">Image price observation: {observedPrice} {currency}. Unverified; confirm it before relying on it.</p>}
+            {priceCurrencyAmbiguous && <p className="text-xs text-amber-600">A price-like value was detected, but the currency could not be identified. Choose the currency and enter the price manually.</p>}
             {ocrText && <Button type="button" variant="outline" disabled={busy} onClick={() => { setMode('search'); void handleSearch(ocrText.slice(0, 200)); }}>Search using extracted text</Button>}
           </section>}
 
@@ -359,7 +418,37 @@ export default function AddItem() {
                   <div className="space-y-1.5"><Label>Model number</Label><Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="Manufacturer model" /></div>
                 </div>
                 <div className="space-y-1.5"><Label>EAN / UPC / GTIN (optional)</Label><Input inputMode="numeric" value={gtin} onChange={(e) => { setGtin(e.target.value); setProductVerified(false); }} placeholder="Barcode identifier" /></div>
-                <div className="space-y-1.5"><Label>Variant</Label><Input value={variant} onChange={(e) => setVariant(e.target.value)} placeholder="Color, capacity, size, bundle" /></div>
+                <div className="space-y-1.5">
+                  <Label>Variant</Label>
+                  <Input value={variant} onChange={(e) => setVariant(e.target.value)} placeholder="Color, capacity, size, bundle" />
+                  {availableVariants.length > 0 && <div className="space-y-2 rounded-xl border border-border/60 p-3">
+                    <p className="text-xs text-muted-foreground">Variants listed on this product page. Select the one you want to track.</p>
+                    <div className="flex flex-wrap gap-2">
+                      {availableVariants.map((option, index) => {
+                        const details = [option.color, option.size, option.capacity].filter(Boolean).join(' · ');
+                        const label = details && !option.name.toLowerCase().includes(details.toLowerCase()) ? `${option.name} · ${details}` : option.name;
+                        return <button type="button" key={`${option.sku || option.gtin || option.name}-${index}`} onClick={() => selectImportedVariant(option)} className={`rounded-lg border px-3 py-2 text-left text-xs ${variant === option.name ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>
+                          <span className="block">{label}</span>
+                          {option.price != null && <span className="mt-1 block font-medium">{option.price} {currency}</span>}
+                        </button>;
+                      })}
+                    </div>
+                  </div>}
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Product condition</Label>
+                  <Select value={condition} onValueChange={(value) => setCondition(value as ProductCondition)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="new">New</SelectItem>
+                      <SelectItem value="refurbished">Refurbished</SelectItem>
+                      <SelectItem value="open_box">Open box</SelectItem>
+                      <SelectItem value="used">Used</SelectItem>
+                      <SelectItem value="unknown">Unknown / not stated</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">Offers in a different or unknown condition will not count as an exact deal.</p>
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5"><Label>Starting price (optional)</Label><Input type="number" min="0" step="any" value={price} onChange={(e) => { setPrice(e.target.value); setPriceSource('user_entered'); }} placeholder="Not a live offer" /></div>
                   <div className="space-y-1.5"><Label>Currency</Label><Select value={currency} onValueChange={(value) => setCurrency(value as Currency)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.values(CURRENCIES).map((item) => <SelectItem key={item.code} value={item.code}>{item.flag} {item.code}</SelectItem>)}</SelectContent></Select></div>

@@ -1,6 +1,9 @@
 import { fetchProduct } from "@/lib/api";
 import { searchGlobalProducts, lookupBarcodeGlobal } from "@/lib/providers";
 import { supabase } from "@/lib/supabase";
+import { normalizeProductImportUrl, productUrlSearchHint } from "@/lib/importIdentity";
+import { parseImagePrice } from "@/lib/imagePrice";
+import { normalizeProductCondition } from "@/lib/productCondition";
 import type {
   FetchedProduct,
   ProductCandidate,
@@ -33,20 +36,40 @@ export async function importFromUrl(url: string): Promise<ImportResult> {
   try {
     fetched = await fetchProduct(url);
   } catch {
-    // Edge function failed or unavailable
+    // Search providers may still find a candidate when the retailer blocks the
+    // metadata fetch. The URL slug is only a query hint, never product data.
   }
 
-  // Preserve the source URL, but never invent a title or price from its slug.
   if (!fetched) {
-    throw new Error("This site could not provide product metadata. Keep the source URL and enter the product details manually.");
+    const searchHint = productUrlSearchHint(url);
+    const candidates = searchHint.length > 2
+      ? await searchGlobalProducts(searchHint).catch(() => [])
+      : [];
+    return {
+      product: {
+        title: "",
+        image_url: null,
+        additional_images: [],
+        price: null,
+        currency: "",
+        store: parsed.hostname.replace(/^www\./i, ""),
+        description: null,
+        canonical_url: normalizeProductImportUrl(url) || url,
+        source: "url_search_fallback",
+        extraction_status: "failed",
+      },
+      candidates,
+      offers: [],
+      status: "partial",
+      confidence: 0,
+      message: candidates.length
+        ? "The retailer page could not be read. Choose a search candidate only if it is the same product and variant; Wishly did not infer a title or price from the URL."
+        : "The retailer page could not be read and no search candidates were found. The source link is preserved; enter product details manually.",
+    };
   }
 
   const partialTitle = typeof fetched.title === "string" ? fetched.title : "";
-  const encodedPath = parsed.pathname.split("/").filter(Boolean).pop() || "";
-  let decodedPath = encodedPath;
-  try { decodedPath = decodeURIComponent(encodedPath); } catch { /* Keep malformed but harmless path text encoded. */ }
-  const fromPath = decodedPath
-    .replace(/\.(?:html?|php)$/i, "").replace(/[-_]+/g, " ").replace(/\b\d{5,}\b/g, " ").trim();
+  const fromPath = productUrlSearchHint(url);
   const query = [fetched.brand, fetched.model_number, partialTitle || fromPath].filter(Boolean).join(" ").slice(0, 240);
   const candidates = (!fetched.gtin && !(fetched.brand && fetched.model_number) && query.length > 2)
     ? await searchGlobalProducts(query).catch(() => [])
@@ -58,7 +81,9 @@ export async function importFromUrl(url: string): Promise<ImportResult> {
     offers: [],
     status: fetched.gtin ? "identified" : "partial",
     confidence: fetched.gtin ? 1 : fetched.model_number && fetched.brand ? 0.92 : fetched.title ? 0.65 : 0,
-    message: fetched.title
+    message: fetched.price_conflict
+      ? "The page reports conflicting prices or currencies. Confirm the current price and currency before saving."
+      : fetched.title
       ? candidates.length ? "Page details are partial. Choose a search result if it is the exact model and variant." : undefined
       : candidates.length ? "The product page exposed little metadata. Choose the exact candidate or enter its details manually."
       : "The page responded, but Wishly could not identify a product name. Add or correct the details below.",
@@ -79,6 +104,7 @@ export async function importFromImage(file: File): Promise<{
   detectedText: string;
   observedPrice: number | null;
   observedCurrency: string;
+  priceCurrencyAmbiguous: boolean;
   candidates: ProductCandidate[];
   previewUrl: string;
 }> {
@@ -112,21 +138,7 @@ export async function importFromImage(file: File): Promise<{
   const nameHint = file.name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ").replace(/\b(screenshot|photo|image|img_\d+)\b/ig, "").trim();
   const searchTerms = detectedText || nameHint;
 
-  let observedPrice: number | null = null;
-  let observedCurrency = "USD";
-
-  // Check if filename contains price pattern (e.g., "iPhone 15 799 USD")
-  const priceMatch = detectedText.match(/(\$|€|£|MAD|د\.م\.)\s*(\d+[.,]?\d{0,2})|\b(\d+[.,]?\d{0,2})\s*(USD|EUR|GBP|MAD)\b/i);
-  if (priceMatch) {
-    const rawVal = parseFloat((priceMatch[2] || priceMatch[3] || "").replace(",", "."));
-    if (!isNaN(rawVal) && rawVal > 0) {
-      observedPrice = rawVal;
-      const marker = `${priceMatch[1] || ""} ${priceMatch[4] || ""}`.toUpperCase();
-      if (marker.includes("€") || marker.includes("EUR")) observedCurrency = "EUR";
-      else if (marker.includes("£") || marker.includes("GBP")) observedCurrency = "GBP";
-      else if (marker.includes("MAD") || marker.includes("د.م")) observedCurrency = "MAD";
-    }
-  }
+  const imagePrice = parseImagePrice(detectedText);
 
   // Google Lens searches the image itself; OCR text also feeds the normal catalog search.
   const imageCandidates = await searchGlobalImage(file).catch(() => [] as ProductCandidate[]);
@@ -140,8 +152,9 @@ export async function importFromImage(file: File): Promise<{
 
   return {
     detectedText,
-    observedPrice,
-    observedCurrency,
+    observedPrice: imagePrice.amount,
+    observedCurrency: imagePrice.currency || "",
+    priceCurrencyAmbiguous: imagePrice.currencyAmbiguous,
     candidates,
     previewUrl,
   };
@@ -233,7 +246,8 @@ export async function saveImportedProductToWishlist(params: {
   targetPrice?: number | null;
   isVerified?: boolean;
   priceSource?: string;
-}): Promise<string> {
+  condition?: string;
+}): Promise<{ itemId: string; isDuplicate: boolean }> {
   if (params.gtin && !isValidGtin(params.gtin.replace(/\D/g, ""))) {
     throw new Error("Enter a valid GTIN/EAN/UPC check digit or remove the identifier.");
   }
@@ -265,59 +279,35 @@ export async function saveImportedProductToWishlist(params: {
     }
   }
 
-  // 2. Insert item into Wishlist
-  const { data: newItem, error: itemError } = await supabase
-    .from("items")
-    .insert({
-      wishlist_id: params.wishlistId,
-      title: params.title,
-      image_url: params.imageUrl || null,
-      additional_images: params.additionalImages || [],
-      description: params.description || null,
-      category: params.category || null,
-      variant_label: params.variantName || null,
-      url: params.url || null,
-      store: params.store || null,
-      current_price: params.price && params.price > 0 ? params.price : null,
-      original_price: params.originalPrice && params.originalPrice > 0 ? params.originalPrice : null,
-      currency: params.currency || "USD",
-      priority: params.priority ?? 2,
-      notes: params.notes || null,
-      status: "wanted",
-      target_price: params.targetPrice && params.targetPrice > 0 ? params.targetPrice : null,
-      position: 0,
-      product_id: productId,
-      variant_id: variantId,
-      brand: params.brand || null,
-      model_number: params.modelNumber || null,
-      gtin: params.gtin || null,
-      is_verified: params.isVerified ?? false,
-      price_source: params.priceSource || "user_entered",
-      enrichment_status: productId || params.gtin || params.modelNumber ? "processing" : "manual",
-    })
-    .select("id")
-    .single();
+  // The RPC checks ownership and serializes same-wishlist imports so duplicate
+  // submits return the existing row instead of creating another item.
+  const { data: savedRows, error: itemError } = await supabase.rpc("save_wishlist_item_once_with_condition", {
+    p_wishlist_id: params.wishlistId,
+    p_title: params.title,
+    p_image_url: params.imageUrl || null,
+    p_additional_images: params.additionalImages || [],
+    p_description: params.description || null,
+    p_category: params.category || null,
+    p_variant_label: params.variantName || null,
+    p_url: normalizeProductImportUrl(params.url) || params.url?.trim() || null,
+    p_store: params.store || null,
+    p_current_price: params.price && params.price > 0 ? params.price : null,
+    p_original_price: params.originalPrice && params.originalPrice > 0 ? params.originalPrice : null,
+    p_currency: params.currency || "USD",
+    p_priority: params.priority ?? 2,
+    p_notes: params.notes || null,
+    p_target_price: params.targetPrice && params.targetPrice > 0 ? params.targetPrice : null,
+    p_product_id: productId,
+    p_variant_id: variantId,
+    p_brand: params.brand || null,
+    p_model_number: params.modelNumber || null,
+    p_gtin: params.gtin ? params.gtin.replace(/\D/g, "") : null,
+    p_is_verified: params.isVerified ?? false,
+    p_price_source: params.priceSource || "user_entered",
+    p_condition: normalizeProductCondition(params.condition),
+  });
+  const saved = savedRows?.[0];
+  if (itemError || !saved) throw new Error(itemError?.message || "Failed to save item to wishlist");
 
-  if (itemError || !newItem) {
-    throw new Error(itemError?.message || "Failed to save item to wishlist");
-  }
-
-  // Record the user's original price as an unverified observation.
-  if (params.price && params.price > 0) {
-    try {
-      await supabase.rpc("record_price_observation", {
-        p_item_id: newItem.id,
-        p_price: params.price,
-        p_store: params.store || "Initial Listing",
-        p_currency: params.currency || "USD",
-        p_source: params.priceSource || "user_entered",
-        p_source_url: params.url || null,
-        p_is_verified: false,
-      });
-    } catch {
-      // Non-blocking
-    }
-  }
-
-  return newItem.id;
+  return { itemId: saved.item_id, isDuplicate: saved.is_duplicate };
 }

@@ -6,10 +6,7 @@ import {
   Gift,
   Bell,
   Trash2,
-  Edit,
-  TrendingDown,
   CheckCircle,
-  Share2,
   Loader2,
   RefreshCw,
 } from 'lucide-react';
@@ -19,13 +16,15 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { PriorityBadge } from '@/components/shared/PriorityBadge';
 import { PriceChart } from '@/components/shared/PriceChart';
 import { StoreComparisonTable } from '@/components/shared/StoreComparisonTable';
 import { getItem, updateItem, deleteItem, reserveItem, unreserveItem, getStyleProfile, getFunctionError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
-import { useCurrency } from '@/contexts/CurrencyContext';
 import { type Currency, formatPrice } from '@/lib/currency';
+import { formatProductCondition } from '@/lib/productCondition';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
 
@@ -34,16 +33,20 @@ export default function ItemDetail() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { profile } = useAuth();
-  const { format } = useCurrency();
 
   const [alertEnabled, setAlertEnabled] = useState(false);
   const [targetPrice, setTargetPrice] = useState('');
+  const [dropPercent, setDropPercent] = useState('');
+  const [alertOnAnyLower, setAlertOnAnyLower] = useState(false);
+  const [alertOnNewRetailer, setAlertOnNewRetailer] = useState(false);
+  const [alertOnBackInStock, setAlertOnBackInStock] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
-  const { data: item, isLoading } = useQuery({
+  const { data: item, isLoading, isError: itemLoadFailed, refetch: retryLoadItem } = useQuery({
     queryKey: ['item-detail', id],
     queryFn: () => (id ? getItem(id) : Promise.resolve(null)),
     enabled: !!id,
+    refetchInterval: (query) => ['processing', 'identified', 'searching_offers'].includes(query.state.data?.enrichment_status || '') ? 30_000 : false,
   });
   const { data: styleProfile } = useQuery({
     queryKey: ['style-profile', profile?.id],
@@ -55,6 +58,10 @@ export default function ItemDetail() {
     if (item) {
       setAlertEnabled(item.target_price !== null);
       if (item.target_price) setTargetPrice(String(item.target_price));
+      setDropPercent(item.price_drop_percent == null ? '' : String(item.price_drop_percent));
+      setAlertOnAnyLower(item.alert_on_any_lower_price);
+      setAlertOnNewRetailer(item.alert_on_new_cheaper_offer);
+      setAlertOnBackInStock(item.alert_on_back_in_stock);
       setSelectedImage(item.image_url || item.additional_images?.[0] || null);
     }
   }, [item]);
@@ -71,7 +78,7 @@ export default function ItemDetail() {
     partial: 'Partial results. Some product or offer details could not be verified.',
     no_matches: 'No exact retailer match found in the configured search sources yet.',
     failed: 'Offer search failed. The wishlist item is still saved.',
-    manual: 'Manually entered product. Offer search needs a reliable model or identifier.',
+    manual: 'Manual product details saved. Research needs a reliable model or identifier before it can find exact retailer matches.',
   };
 
   const displayPricePoints = item?.price_points ?? [];
@@ -87,7 +94,7 @@ export default function ItemDetail() {
 
   const refreshOffersMutation = useMutation({
     mutationFn: async () => {
-      const { data, error } = await supabase.functions.invoke('refresh-offers', { body: { item_id: id } });
+      const { data, error } = await supabase.functions.invoke('refresh-offers', { body: { item_id: id, force_refresh: true } });
       if (error) throw await getFunctionError(error, 'Offer search could not reach its provider. Your saved offers are unchanged.');
       if (data?.error) throw new Error(data.error);
       return data;
@@ -124,9 +131,10 @@ export default function ItemDetail() {
   if (!item) {
     return (
       <AppShell>
-        <Header showBack title="Item not found" />
-        <div className="p-6 text-center text-xs text-muted-foreground">
-          This item could not be found.
+        <Header showBack title={itemLoadFailed ? "Could not load item" : "Item not found"} />
+        <div className="p-6 flex flex-col items-center gap-3 text-center text-xs text-muted-foreground">
+          <p>{itemLoadFailed ? "Wishly couldn't load this item's details, price history, or offers. Check your connection and try again." : "This item could not be found."}</p>
+          {itemLoadFailed && <Button variant="outline" size="sm" onClick={() => void retryLoadItem()}>Try again</Button>}
         </div>
       </AppShell>
     );
@@ -155,6 +163,10 @@ export default function ItemDetail() {
         />
 
         <div className="p-4 sm:p-6 max-w-lg mx-auto space-y-6">
+          {itemLoadFailed && <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-800" role="status">
+            <span>Refresh failed. Showing the last loaded item data.</span>
+            <Button variant="outline" size="sm" onClick={() => void retryLoadItem()}>Retry</Button>
+          </div>}
           {/* Main Media & Header */}
           <div className="relative aspect-square w-full rounded-3xl overflow-hidden bg-card/60 border border-border/50 shadow-lg">
             {selectedImage ? (
@@ -208,6 +220,7 @@ export default function ItemDetail() {
               {enrichmentMessage[item.enrichment_status] || 'Product details saved.'}
               {item.offers_last_checked_at && ` Last checked ${new Date(item.offers_last_checked_at).toLocaleString()}.`}
             </p>
+            {item.enrichment_error && <p className="text-xs text-amber-700" role="status">{item.enrichment_error}</p>}
 
             <div className="flex items-baseline gap-2">
               {item.current_price !== null ? (
@@ -228,6 +241,20 @@ export default function ItemDetail() {
               </div>
             )}
             {(item.variant_label || item.category) && <p className="text-xs text-muted-foreground">{[item.variant_label, item.category].filter(Boolean).join(' · ')}</p>}
+            {isOwner ? <div className="max-w-xs space-y-1.5">
+              <Label htmlFor="tracked-condition" className="text-xs">Tracked condition</Label>
+              <Select value={item.condition || 'unknown'} onValueChange={(value) => updateMutation.mutate({ condition: value })}>
+                <SelectTrigger id="tracked-condition" aria-label="Tracked product condition"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="new">New</SelectItem>
+                  <SelectItem value="refurbished">Refurbished</SelectItem>
+                  <SelectItem value="open_box">Open box</SelectItem>
+                  <SelectItem value="used">Used</SelectItem>
+                  <SelectItem value="unknown">Unknown / not stated</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground">Only offers in this condition count as exact deals and price alerts.</p>
+            </div> : <p className="text-xs text-muted-foreground">Condition: {formatProductCondition(item.condition)}</p>}
             {item.description && <p className="text-sm text-muted-foreground leading-relaxed">{item.description}</p>}
           </div>
 
@@ -333,6 +360,42 @@ export default function ItemDetail() {
                   </Button>
                 </div>
               )}
+              <div className="space-y-3 border-t border-border/40 pt-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <span className="block text-xs font-medium">Notify on a percentage drop</span>
+                    <span className="text-[10px] text-muted-foreground">Compared with the saved listing price</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input type="number" min="1" max="100" aria-label="Price drop percentage" placeholder="10%" value={dropPercent} onChange={(event) => setDropPercent(event.target.value)} className="h-8 w-20 rounded-lg text-xs" />
+                    <Button size="sm" variant="outline" onClick={() => {
+                      const parsed = Number.parseInt(dropPercent, 10);
+                      if (dropPercent && (!Number.isInteger(parsed) || parsed < 1 || parsed > 100)) {
+                        toast.error('Choose a drop threshold from 1% to 100%.');
+                        return;
+                      }
+                      updateMutation.mutate({ price_drop_percent: dropPercent ? parsed : null });
+                    }} className="h-8 rounded-lg px-2 text-[10px]">Save</Button>
+                  </div>
+                </div>
+                {[
+                  ['Any lower offer', 'Alert for each fresh high-confidence listing below the saved price.', alertOnAnyLower, setAlertOnAnyLower, 'alert_on_any_lower_price'],
+                  ['New cheaper retailer', 'Alert when a newly discovered retailer lists it below the saved price.', alertOnNewRetailer, setAlertOnNewRetailer, 'alert_on_new_cheaper_offer'],
+                  ['Back in stock', 'Alert after a supported source reports an out-of-stock item in stock again.', alertOnBackInStock, setAlertOnBackInStock, 'alert_on_back_in_stock'],
+                ].map(([label, description, checked, setChecked, field]) => (
+                  <div key={String(field)} className="flex items-center justify-between gap-3">
+                    <div>
+                      <span className="block text-xs font-medium">{String(label)}</span>
+                      <span className="text-[10px] text-muted-foreground">{String(description)}</span>
+                    </div>
+                    <Switch checked={Boolean(checked)} onCheckedChange={(value) => {
+                      (setChecked as (value: boolean) => void)(value);
+                      updateMutation.mutate({ [String(field)]: value });
+                    }} />
+                  </div>
+                ))}
+                <p className="text-[10px] text-muted-foreground">Alerts appear in Wishly notifications. Email and push delivery are not configured.</p>
+              </div>
             </div>
           )}
 
@@ -343,7 +406,7 @@ export default function ItemDetail() {
             </h3>
             <PriceChart
               pricePoints={displayPricePoints as any}
-              currency={(item.currency as Currency) || 'MAD'}
+              currency={(profile?.currency as Currency) || (item.currency as Currency) || 'MAD'}
             />
           </div>
 
@@ -362,6 +425,7 @@ export default function ItemDetail() {
               offers={displayOffers as any}
               styleProfile={styleProfile || null}
               category={item.category}
+              itemCondition={item.condition}
               currency={(item.currency as Currency) || 'MAD'}
               originalPrice={item.current_price}
               originalCurrency={item.currency as Currency}

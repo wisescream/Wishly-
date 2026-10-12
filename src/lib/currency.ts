@@ -33,6 +33,10 @@ export const CURRENCIES: Record<Currency, CurrencyConfig> = {
   CNY: { code: "CNY", symbol: "¥", name: "Chinese Yuan", locale: "zh-CN", flag: "🇨🇳" },
 };
 
+export function isSupportedCurrency(value: string | null | undefined): value is Currency {
+  return typeof value === "string" && value === value.toUpperCase() && Object.prototype.hasOwnProperty.call(CURRENCIES, value);
+}
+
 // Base exchange rates relative to USD (Last updated benchmark: 2026-10)
 export const USD_EXCHANGE_RATES: Record<Currency, number> = {
   USD: 1.0,
@@ -122,6 +126,11 @@ export function convertCurrency(
 export function formatPrice(amount: number | null | undefined, currencyRaw: string = "USD"): string {
   if (amount === null || amount === undefined || isNaN(amount)) {
     return "—";
+  }
+
+  const rawCode = currencyRaw.trim().toUpperCase();
+  if (/^[A-Z]{3}$/.test(rawCode) && !isSupportedCurrency(rawCode)) {
+    return `${new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount)} ${rawCode}`;
   }
 
   const currency = normalizeCurrency(currencyRaw);

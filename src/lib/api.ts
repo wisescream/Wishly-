@@ -15,7 +15,6 @@ import type {
   FetchedProduct,
   AiMessage,
   AiSuggestion,
-  Privacy,
   ItemStatus,
   FriendshipStatus,
 } from "@/types/database";
@@ -287,37 +286,44 @@ export async function getFriendsWishlists(userId: string): Promise<WishlistWithI
 // ═══════════════════════════════════════════════════════════════
 
 export async function getItem(itemId: string): Promise<ItemWithDetails | null> {
-  const { data: item } = await supabase
+  const { data: item, error: itemError } = await supabase
     .from("items")
     .select("*")
     .eq("id", itemId)
-    .single();
+    .maybeSingle();
 
+  if (itemError) throw itemError;
   if (!item) return null;
 
-  const { data: pricePoints } = await supabase
-    .from("price_points")
-    .select("*")
-    .eq("item_id", itemId)
-    .order("recorded_at", { ascending: true });
+  const historySince = new Date(Date.now() - 366 * 24 * 60 * 60 * 1000).toISOString();
+  const [historyResult, offersResult, wishlistResult] = await Promise.all([
+    supabase
+      .from("price_points")
+      .select("*")
+      .eq("item_id", itemId)
+      .gte("recorded_at", historySince)
+      .order("recorded_at", { ascending: true }),
+    supabase
+      .from("store_offers")
+      .select("*")
+      .eq("item_id", itemId)
+      .order("price", { ascending: true }),
+    supabase
+      .from("wishlists")
+      .select("*")
+      .eq("id", item.wishlist_id)
+      .maybeSingle(),
+  ]);
 
-  const { data: storeOffers } = await supabase
-    .from("store_offers")
-    .select("*")
-    .eq("item_id", itemId)
-    .order("price", { ascending: true });
-
-  const { data: wishlist } = await supabase
-    .from("wishlists")
-    .select("*")
-    .eq("id", item.wishlist_id)
-    .single();
+  if (historyResult.error) throw historyResult.error;
+  if (offersResult.error) throw offersResult.error;
+  if (wishlistResult.error) throw wishlistResult.error;
 
   return {
     ...item,
-    price_points: pricePoints ?? [],
-    store_offers: storeOffers ?? [],
-    wishlist: wishlist ?? undefined,
+    price_points: historyResult.data ?? [],
+    store_offers: offersResult.data ?? [],
+    wishlist: wishlistResult.data ?? undefined,
   };
 }
 
@@ -367,21 +373,23 @@ export async function getPriceHistory(
 ): Promise<PricePoint[]> {
   const since = new Date();
   since.setDate(since.getDate() - days);
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("price_points")
     .select("*")
     .eq("item_id", itemId)
     .gte("recorded_at", since.toISOString())
     .order("recorded_at", { ascending: true });
+  if (error) throw error;
   return data ?? [];
 }
 
 export async function getStoreOffers(itemId: string): Promise<StoreOffer[]> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("store_offers")
     .select("*")
     .eq("item_id", itemId)
     .order("price", { ascending: true });
+  if (error) throw error;
   return data ?? [];
 }
 

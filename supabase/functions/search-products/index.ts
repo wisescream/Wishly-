@@ -1,20 +1,14 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { parseEstimatedUnitCost, recordProviderMetric } from "../_shared/provider-metrics.ts";
+import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
+import { resolveSearchMarket } from "../_shared/search-market.ts";
+import { parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
-const requests = new Map<string, { start: number; count: number }>();
-
-function currencyFromPrice(price: string): string {
-  if (/€|\bEUR\b/i.test(price)) return "EUR";
-  if (/£|\bGBP\b/i.test(price)) return "GBP";
-  if (/د\.م|MAD/i.test(price)) return "MAD";
-  if (/¥|\bJPY\b/i.test(price)) return "JPY";
-  return "USD";
-}
-
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -36,29 +30,61 @@ serve(async (req) => {
     const userClient = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authorization } } });
     const { data: auth } = await userClient.auth.getUser();
     if (!auth.user) return json({ error: "Authentication required." }, 401);
-    const now = Date.now();
-    const window = requests.get(auth.user.id);
-    if (window && now - window.start < 60_000 && window.count >= 20) return json({ error: "Search limit reached. Try again in a minute." }, 429);
-    requests.set(auth.user.id, !window || now - window.start >= 60_000 ? { start: now, count: 1 } : { ...window, count: window.count + 1 });
-    if (requests.size > 5_000) for (const [id, item] of requests) if (now - item.start > 60_000) requests.delete(id);
+    const { data: preferences, error: preferencesError } = await userClient.from("profiles").select("country,currency,language").eq("id", auth.user.id).maybeSingle();
+    if (preferencesError) return json({ error: "Your search preferences could not be loaded." }, 503);
+    const market = resolveSearchMarket(preferences?.country, preferences?.currency, preferences?.language);
+    const { data: userRequestReserved, error: userRequestError } = await userClient.rpc("reserve_interactive_provider_request", { p_surface: "product_search" });
+    if (userRequestError) return json({ error: "Search limits are temporarily unavailable. Try again shortly." }, 503);
+    if (userRequestReserved !== true) return json({ error: "Search limit reached. Try again in a minute." }, 429);
+
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!serviceKey) return json({ error: "Search service is not configured." }, 503);
+    const admin = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+    const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SERPAPI_DAILY_SEARCH_LIMIT") || "31", 10) || 31));
+    const { data: providerRequestReserved, error: providerBudgetError } = await admin.rpc("reserve_provider_search", { p_provider: "serpapi", p_daily_limit: dailyLimit });
+    if (providerBudgetError) return json({ error: "Shopping search budget could not be checked. Try again shortly." }, 503);
+    if (providerRequestReserved !== true) return json({ configured: true, candidates: [], offers: [], error: "Wishly reached its configured daily Shopping search budget. Try again tomorrow." }, 429);
 
     const url = new URL("https://serpapi.com/search.json");
     url.searchParams.set("engine", "google_shopping");
     url.searchParams.set("q", query.trim());
-    url.searchParams.set("gl", "us");
-    url.searchParams.set("hl", "en");
+    url.searchParams.set("gl", market.gl);
+    url.searchParams.set("hl", market.hl);
     url.searchParams.set("api_key", key);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     let response: Response;
+    const startedAt = Date.now();
+    let statusCode: number | null = null;
+    let resultCount = 0;
+    let outcome: "success" | "error" = "error";
     try {
       response = await fetch(url, { signal: controller.signal });
+    } catch {
+      await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome, durationMs: Date.now() - startedAt, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: market.country });
+      return json({ configured: true, candidates: [], offers: [], error: "Shopping search provider could not be reached." }, 502);
     } finally {
       clearTimeout(timeout);
     }
-    if (!response.ok) return json({ configured: true, candidates: [], offers: [], error: "Shopping search provider is temporarily unavailable." });
-    const payload = await response.json();
-    const rows = Array.isArray(payload.shopping_results) ? payload.shopping_results.slice(0, 20) : [];
+    statusCode = response.status;
+    if (!response.ok) {
+      await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome, durationMs: Date.now() - startedAt, statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: market.country });
+      return json({ configured: true, candidates: [], offers: [], error: "Shopping search provider is temporarily unavailable." });
+    }
+    let payload: unknown;
+    try { payload = await response.json(); }
+    catch {
+      await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome, durationMs: Date.now() - startedAt, statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: market.country });
+      return json({ configured: true, candidates: [], offers: [], error: "Shopping search provider returned an unreadable response." }, 502);
+    }
+    const parsed = parseSerpApiShoppingResponse(payload);
+    if (parsed.error) {
+      await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome, durationMs: Date.now() - startedAt, statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: market.country });
+      return json({ configured: true, candidates: [], offers: [], error: "Shopping search provider could not complete this search." });
+    }
+    const rows = parsed.rows.slice(0, 20) as any[];
+    resultCount = rows.length;
+    outcome = "success";
 
     if (mode === "offers" && product && typeof product.title === "string") {
       const offers = rows.flatMap((row: any) => {
@@ -73,10 +99,12 @@ serve(async (req) => {
         const price = Number(row.extracted_price);
         const link = typeof row.link === "string" ? row.link : "";
         if (!Number.isFinite(price) || price <= 0 || !/^https?:\/\//i.test(link)) return [];
+        const currency = resolveProviderCurrency(String(row.price || ""), market.currency);
+        if (!currency) return [];
         return [{
           store: String(row.source || "Retailer"),
           price,
-          currency: currencyFromPrice(String(row.price || "")),
+          currency,
           url: link,
           condition: "unknown",
           availability: "unknown",
@@ -85,18 +113,20 @@ serve(async (req) => {
           match_basis: explicitGtin ? "gtin" : "model_number",
         }];
       });
+      await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome, durationMs: Date.now() - startedAt, resultCount, statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: market.country });
       return json({ configured: true, offers });
     }
 
     const candidates = rows.flatMap((row: any) => {
       if (!row.title) return [];
       const price = Number(row.extracted_price);
+      const currency = resolveProviderCurrency(String(row.price || ""), market.currency);
       return [{
         title: String(row.title),
         brand: null,
         image_url: row.thumbnail || null,
-        price: Number.isFinite(price) && price > 0 ? price : null,
-        currency: currencyFromPrice(String(row.price || "")),
+        price: Number.isFinite(price) && price > 0 && currency ? price : null,
+        currency: currency || undefined,
         store: row.source || null,
         url: typeof row.link === "string" && /^https?:\/\//i.test(row.link) ? row.link : null,
         confidence: 0.5,
@@ -104,6 +134,7 @@ serve(async (req) => {
         source: "google_shopping",
       }];
     });
+    await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome, durationMs: Date.now() - startedAt, resultCount, statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: market.country });
     return json({ configured: true, candidates });
   } catch {
     return json({ error: "Could not complete product search." }, 500);

@@ -1,5 +1,34 @@
 import type { ProviderAdapter } from "./types";
 import type { ProductCandidate, FetchedOffer } from "@/types/database";
+import { parseProviderShipping } from "./offerCosts";
+
+export function mapUpcItemDbOffer(o: any): FetchedOffer | null {
+  const price = Number(o.price);
+  const url = typeof o.link === "string" && /^https?:\/\//i.test(o.link) ? o.link : null;
+  if (!Number.isFinite(price) || price <= 0 || !url) return null;
+  const shipping = parseProviderShipping(o.shipping, "USD");
+
+  return {
+    store: o.merchant || "Online Retailer",
+    price,
+    currency: "USD",
+    url,
+    condition: o.condition ? String(o.condition).toLowerCase() : "unknown",
+    availability: o.availability && /out of stock|unavailable/i.test(String(o.availability))
+      ? "out_of_stock"
+      : o.availability && /in stock|available/i.test(String(o.availability))
+      ? "in_stock"
+      : "unknown",
+    shipping_cost: shipping.cost,
+    shipping_known: shipping.known,
+    delivery_estimate: shipping.evidence,
+    taxes_known: false,
+    total_price: null,
+    total_is_estimated: true,
+    source: "upcitemdb",
+    last_verified_at: o.updated_t ? new Date(o.updated_t * 1000).toISOString() : new Date().toISOString(),
+  };
+}
 
 export const UpcItemDbProvider: ProviderAdapter = {
   id: "upcitemdb",
@@ -42,22 +71,7 @@ export const UpcItemDbProvider: ProviderAdapter = {
       const item = data.items?.[0];
       if (!item) return null;
 
-      const offers: FetchedOffer[] = (item.offers || []).map((o: any) => ({
-        store: o.merchant || "Online Retailer",
-        price: Number(o.price || 0),
-        currency: "USD",
-        url: o.link || "#",
-        condition: o.condition ? String(o.condition).toLowerCase() : "unknown",
-        availability: o.availability && /out of stock|unavailable/i.test(String(o.availability))
-          ? "out_of_stock"
-          : o.availability && /in stock|available/i.test(String(o.availability))
-          ? "in_stock"
-          : "unknown",
-        shipping_cost: o.shipping ? parseFloat(o.shipping) : 0,
-        total_price: o.price ? Number(o.price) + (o.shipping ? parseFloat(o.shipping) : 0) : null,
-        source: "upcitemdb",
-        last_verified_at: o.updated_t ? new Date(o.updated_t * 1000).toISOString() : new Date().toISOString(),
-      }));
+      const offers: FetchedOffer[] = (item.offers || []).map(mapUpcItemDbOffer).filter((offer: FetchedOffer | null): offer is FetchedOffer => offer !== null);
 
       return {
         title: item.title,
@@ -88,22 +102,7 @@ export const UpcItemDbProvider: ProviderAdapter = {
       const item = data.items?.[0];
       if (!item || !item.offers) return [];
 
-      return item.offers.map((o: any): FetchedOffer => ({
-        store: o.merchant || "Online Retailer",
-        price: Number(o.price || 0),
-        currency: "USD",
-        url: o.link || "#",
-        condition: o.condition ? String(o.condition).toLowerCase() : "unknown",
-        availability: o.availability && /out of stock|unavailable/i.test(String(o.availability))
-          ? "out_of_stock"
-          : o.availability && /in stock|available/i.test(String(o.availability))
-          ? "in_stock"
-          : "unknown",
-        shipping_cost: o.shipping ? parseFloat(o.shipping) : 0,
-        total_price: o.price ? Number(o.price) + (o.shipping ? parseFloat(o.shipping) : 0) : null,
-        source: "upcitemdb",
-        last_verified_at: o.updated_t ? new Date(o.updated_t * 1000).toISOString() : new Date().toISOString(),
-      }));
+      return item.offers.map(mapUpcItemDbOffer).filter((offer: FetchedOffer | null): offer is FetchedOffer => offer !== null);
     } catch {
       return [];
     }

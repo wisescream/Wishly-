@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PricePoint } from '@/types/database';
-import { summarizePriceHistory } from './priceHistory';
+import { getPriceHistoryXPosition, groupPriceHistoryByListing, summarizePriceHistory } from './priceHistory';
 
 const now = Date.parse('2026-10-10T12:00:00Z');
 const point = (id: string, price: number, currency: string, daysAgo: number): PricePoint => ({
@@ -38,5 +38,30 @@ describe('summarizePriceHistory', () => {
     const invalid = { ...point('bad', -3, 'MAD', 1), recorded_at: 'not-a-date' };
     const future = { ...point('future', 4, 'MAD', 0), recorded_at: new Date(now + 1000).toISOString() };
     expect(summarizePriceHistory([invalid, future], 'MAD', 30, now).points).toEqual([]);
+  });
+});
+
+describe('groupPriceHistoryByListing', () => {
+  it('keeps the original listing and each competitor offer in separate histories', () => {
+    const original = point('original', 100, 'MAD', 2);
+    const firstOffer = { ...point('offer-a', 90, 'MAD', 1), offer_id: 'offer-a', store: 'Shop A' };
+    const secondOffer = { ...point('offer-b', 80, 'MAD', 1), offer_id: 'offer-b', store: 'Shop B' };
+    const series = groupPriceHistoryByListing([firstOffer, original, secondOffer]);
+    expect(series.map(({ key }) => key)).toEqual(['original', 'offer:offer-a', 'offer:offer-b']);
+    expect(series.map(({ points }) => points.map(({ id }) => id))).toEqual([['original'], ['offer-a'], ['offer-b']]);
+  });
+});
+
+describe('getPriceHistoryXPosition', () => {
+  it('positions observations according to elapsed time and bounds them to the selected period', () => {
+    expect(getPriceHistoryXPosition(0, 0, 100, 20, 280)).toBe(20);
+    expect(getPriceHistoryXPosition(25, 0, 100, 20, 280)).toBe(85);
+    expect(getPriceHistoryXPosition(100, 0, 100, 20, 280)).toBe(280);
+    expect(getPriceHistoryXPosition(150, 0, 100, 20, 280)).toBe(280);
+  });
+
+  it('falls back safely for invalid timestamps and periods', () => {
+    expect(getPriceHistoryXPosition(Number.NaN, 0, 100, 20, 280)).toBe(20);
+    expect(getPriceHistoryXPosition(10, 10, 10, 20, 280)).toBe(20);
   });
 });

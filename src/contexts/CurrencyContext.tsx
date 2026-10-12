@@ -11,6 +11,7 @@ import {
   formatPrice as formatPriceUtil,
   convertCurrency,
   CURRENCIES,
+  isSupportedCurrency,
 } from "@/lib/currency";
 import { useAuth } from "./AuthContext";
 
@@ -50,12 +51,16 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
   }, [profile?.currency]);
 
   const format = (amount: number, from?: Currency) => {
-    const converted = from ? convertCurrency(amount, from, currency).convertedAmount : amount;
+    const source = from?.toUpperCase();
+    if (source && !isSupportedCurrency(source)) return formatPriceUtil(amount, source);
+    const converted = source ? convertCurrency(amount, source, currency).convertedAmount : amount;
     return formatPriceUtil(converted, currency);
   };
 
   const convert = (amount: number, from: Currency) => {
-    return convertCurrency(amount, from, currency).convertedAmount;
+    const source = from.toUpperCase();
+    if (!isSupportedCurrency(source)) return amount;
+    return convertCurrency(amount, source, currency).convertedAmount;
   };
 
   return (

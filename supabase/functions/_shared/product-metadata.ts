@@ -4,6 +4,7 @@ export interface ProductMetadata {
   additional_images: string[];
   description: string | null;
   price: number | null;
+  price_conflict: boolean;
   original_price: number | null;
   discount_percent: number | null;
   currency: string;
@@ -15,7 +16,7 @@ export interface ProductMetadata {
   condition: string;
   availability: string;
   canonical_url: string | null;
-  variants: Array<{ name: string; sku?: string; color?: string; size?: string; capacity?: string }>;
+  variants: Array<{ name: string; sku?: string; gtin?: string; color?: string; size?: string; capacity?: string; price?: number; image_url?: string }>;
   variant_name: string | null;
   variant_details: { color?: string; size?: string; capacity?: string; sku?: string };
 }
@@ -29,8 +30,11 @@ const text = (value: unknown): string | null => {
 function decode(value: string): string {
   return value.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt|nbsp);/gi, (_, entity: string) => {
     const key = entity.toLowerCase();
-    if (key.startsWith("#x")) return String.fromCodePoint(parseInt(key.slice(2), 16));
-    if (key.startsWith("#")) return String.fromCodePoint(parseInt(key.slice(1), 10));
+    if (key.startsWith("#x") || key.startsWith("#")) {
+      const codePoint = Number.parseInt(key.startsWith("#x") ? key.slice(2) : key.slice(1), key.startsWith("#x") ? 16 : 10);
+      if (!Number.isFinite(codePoint) || codePoint < 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return "\uFFFD";
+      return String.fromCodePoint(codePoint);
+    }
     return ({ amp: "&", quot: '"', apos: "'", lt: "<", gt: ">", nbsp: " " } as Record<string, string>)[key] || _;
   });
 }
@@ -117,10 +121,12 @@ export function parseProductMetadata(html: string, pageUrl: string): ProductMeta
     const score = (node: Record<string, any>) => Number(Boolean(node.gtin || node.gtin13 || node.mpn)) * 4 + Number(Boolean(node.offers)) * 3 + Number(Boolean(node.brand || node.model)) * 2 + Number(Boolean(node.image));
     return score(b) - score(a);
   })[0] || products[0] || {};
-  const offerValue = Array.isArray(product.offers) ? product.offers[0] : product.offers;
-  const offer = offerValue && typeof offerValue === "object" ? offerValue : {};
-  const aggregate = offer.lowPrice != null ? offer : {};
-  const rawPrice = offer.price ?? offer.lowPrice ?? aggregate.lowPrice ?? meta["product:price:amount"] ?? meta["og:price:amount"];
+  const offerValues = Array.isArray(product.offers) ? product.offers : [product.offers];
+  const offerCandidates = offerValues.filter((value: unknown): value is Record<string, any> => Boolean(value && typeof value === "object"));
+  const offer = offerCandidates.find((candidate) => /instock|limitedavailability/i.test(String(candidate.availability || "")))
+    || offerCandidates.find((candidate) => candidate.price != null || candidate.lowPrice != null)
+    || offerCandidates[0]
+    || {};
   const parsePrice = (value: unknown): number | null => typeof value === "number" ? value : (() => {
     let raw = String(value ?? "").replace(/[^\d.,-]/g, "");
     const comma = raw.lastIndexOf(",");
@@ -130,7 +136,17 @@ export function parseProductMetadata(html: string, pageUrl: string): ProductMeta
     const parsed = Number.parseFloat(raw);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   })();
-  const parsedPrice = parsePrice(rawPrice);
+  const jsonLdPriceCandidates = offerCandidates.flatMap((candidate) => [candidate.price ?? candidate.lowPrice, candidate.highPrice]
+    .map(parsePrice).filter((price): price is number => price != null));
+  const metadataPriceCandidates = [meta["product:price:amount"], meta["og:price:amount"]]
+    .map(parsePrice).filter((price): price is number => price != null);
+  const priceCandidates = [...jsonLdPriceCandidates, ...metadataPriceCandidates];
+  const jsonLdCurrencies = offerCandidates.map((candidate) => firstText(candidate.priceCurrency)).filter((value): value is string => Boolean(value)).map((value) => value.toUpperCase());
+  const metadataCurrencies = [meta["product:price:currency"], meta["og:price:currency"]].filter(Boolean).map((value) => value.toUpperCase());
+  const currencies = [...jsonLdCurrencies, ...metadataCurrencies];
+  const priceConflict = new Set(priceCandidates.map((price) => Math.round(price * 100))).size > 1
+    || (priceCandidates.length > 0 && new Set(currencies).size > 1);
+  const parsedPrice = priceConflict ? null : jsonLdPriceCandidates[0] ?? metadataPriceCandidates[0] ?? null;
   const specifications = Array.isArray(offer.priceSpecification) ? offer.priceSpecification : [offer.priceSpecification];
   const originalSpec = specifications.find((spec: any) => /list|original|retail|strikethrough/i.test(String(spec?.priceType || spec?.name || "")));
   const parsedOriginal = parsePrice(offer.listPrice ?? offer.strikethroughPrice ?? product.listPrice ?? originalSpec?.price ?? meta["product:price:original_amount"] ?? meta["product:original_price:amount"] ?? meta["product:list_price:amount"] ?? meta["og:price:original_amount"]);
@@ -143,26 +159,56 @@ export function parseProductMetadata(html: string, pageUrl: string): ProductMeta
   });
   const image = images[0] || absolute(meta["og:image"] || meta["og:image:url"] || meta["twitter:image"], pageUrl);
   const imagesAll = [...new Set([image, ...images].filter(Boolean) as string[])];
-  const offerCondition = String(offer.itemCondition || "").toLowerCase();
+  const offerCondition = String(offer.itemCondition || "").toLowerCase().replace(/[^a-z]/g, "");
   const availabilityValue = String(offer.availability || "").toLowerCase();
   let availability = "unknown";
   if (availabilityValue.includes("outofstock") || availabilityValue.includes("soldout")) availability = "out_of_stock";
   else if (availabilityValue.includes("instock") || availabilityValue.includes("limitedavailability")) availability = "in_stock";
   else if (availabilityValue.includes("preorder")) availability = "preorder";
   let condition = "unknown";
-  if (offerCondition.includes("refurbished")) condition = "refurbished";
-  else if (offerCondition.includes("used") || offerCondition.includes("damaged")) condition = "used";
-  else if (offerCondition.includes("newcondition")) condition = "new";
+  if (offerCondition.includes("refurbished") || offerCondition.includes("renewed") || offerCondition.includes("reconditioned")) condition = "refurbished";
+  else if (offerCondition.includes("openbox")) condition = "open_box";
+  else if (offerCondition.includes("used") || offerCondition.includes("damaged") || offerCondition.includes("preowned")) condition = "used";
+  else if (offerCondition.includes("newcondition") || offerCondition === "new") condition = "new";
   const titleTag = html.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1];
   const title = firstText(product.name, meta["og:title"], meta["twitter:title"], titleTag);
   const model = firstText(product.model, product.mpn, meta["product:retailer_item_id"]);
   const gtin = firstText(product.gtin14, product.gtin13, product.gtin12, product.gtin, product.upc, product.ean);
-  const variants = Array.isArray(product.hasVariant) ? product.hasVariant.slice(0, 12).map((variant: any) => ({
-    name: firstText(variant.name, variant.model) || "Variant",
-    ...(text(variant.sku) ? { sku: String(variant.sku) } : {}),
-    ...(text(variant.color) ? { color: String(variant.color) } : {}),
-    ...(text(variant.size) ? { size: String(variant.size) } : {}),
-  })) : [];
+  const variantNodes = products.flatMap((node) => {
+    const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
+    const isProductGroup = types.some((type) => String(type).toLowerCase().split("/").pop() === "productgroup");
+    if (!isProductGroup && node !== product) return [];
+    return (Array.isArray(node.hasVariant) ? node.hasVariant : node.hasVariant ? [node.hasVariant] : [])
+      .filter((variant: unknown) => variant && typeof variant === "object");
+  });
+  const variantKeys = new Set<string>();
+  const pageCurrency = firstText(offer.priceCurrency, meta["product:price:currency"], meta["og:price:currency"])?.toUpperCase() || "";
+  const variants = variantNodes.flatMap((variant: any) => {
+    const variantOfferValues = Array.isArray(variant.offers) ? variant.offers : [variant.offers];
+    const variantPrices = variantOfferValues.flatMap((entry: any) => entry && typeof entry === "object" ? [parsePrice(entry.price ?? entry.lowPrice)].filter((price): price is number => price != null) : []);
+    const uniquePrices = [...new Set(variantPrices.map((price) => Math.round(price * 100) / 100))];
+    const variantCurrencies = [...new Set(variantOfferValues.map((entry: any) => firstText(entry?.priceCurrency)?.toUpperCase()).filter(Boolean))];
+    const color = firstText(variant.color);
+    const size = firstText(variant.size);
+    const capacity = firstText(variant.capacity, variant.storageCapacity, variant.additionalProperty && (Array.isArray(variant.additionalProperty) ? variant.additionalProperty : [variant.additionalProperty]).filter((entry: any) => /capacity|storage/i.test(String(entry.name || ""))).map((entry: any) => entry.value));
+    const sku = firstText(variant.sku);
+    const variantGtin = firstText(variant.gtin14, variant.gtin13, variant.gtin12, variant.gtin, variant.upc, variant.ean);
+    const name = firstText(variant.name, variant.model) || [color, size, capacity].filter(Boolean).join(" · ") || "Variant";
+    const variantImage = absolute(Array.isArray(variant.image) ? variant.image[0] : variant.image, pageUrl);
+    const key = [sku, variantGtin, name, color, size, capacity].map((value) => String(value || "").toLowerCase()).join("|");
+    if (variantKeys.has(key)) return [];
+    variantKeys.add(key);
+    return [{
+      name,
+      ...(sku ? { sku } : {}),
+      ...(variantGtin ? { gtin: variantGtin } : {}),
+      ...(color ? { color } : {}),
+      ...(size ? { size } : {}),
+      ...(capacity ? { capacity } : {}),
+      ...(!priceConflict && pageCurrency && variantCurrencies.length === 1 && variantCurrencies[0] === pageCurrency && uniquePrices.length === 1 ? { price: uniquePrices[0] } : {}),
+      ...(variantImage ? { image_url: variantImage } : {}),
+    }];
+  }).slice(0, 12);
   const variantDetails: { color?: string; size?: string; capacity?: string; sku?: string } = {};
   for (const key of ["color", "size", "sku"] as const) {
     const value = text(product[key]);
@@ -171,13 +217,14 @@ export function parseProductMetadata(html: string, pageUrl: string): ProductMeta
   const capacity = firstText(product.capacity, product.storageCapacity, product.additionalProperty && (Array.isArray(product.additionalProperty) ? product.additionalProperty : [product.additionalProperty]).filter((entry: any) => /capacity|storage/i.test(String(entry.name || ""))).map((entry: any) => entry.value));
   if (capacity) variantDetails.capacity = capacity;
   const variantName = [variantDetails.capacity, variantDetails.color, variantDetails.size].filter(Boolean).join(" · ") || null;
-  const currency = firstText(offer.priceCurrency, meta["product:price:currency"], meta["og:price:currency"]) || "";
+  const currency = priceConflict ? "" : firstText(offer.priceCurrency, meta["product:price:currency"], meta["og:price:currency"]) || "";
   return {
     title,
     image_url: image,
     additional_images: imagesAll.slice(1, 7),
     description: firstText(product.description, meta["og:description"], meta.description, meta["twitter:description"]),
     price: Number.isFinite(parsedPrice) && parsedPrice > 0 ? parsedPrice : null,
+    price_conflict: priceConflict,
     original_price: originalPrice,
     discount_percent: discount,
     currency: /^[A-Z]{3}$/.test(currency) ? currency.toUpperCase() : "",

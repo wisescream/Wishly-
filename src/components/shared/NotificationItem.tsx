@@ -7,9 +7,14 @@ import {
   Cake,
   Gift,
   Bell,
+  ExternalLink,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import type { Notification, NotificationType } from '@/types/database';
 import { timeAgo, cn } from '@/lib/utils';
+import { formatPrice } from '@/lib/currency';
+import { getNotificationAlertDetails } from '@/lib/notificationDetails';
+import { formatProductCondition } from '@/lib/productCondition';
 
 interface NotificationItemProps {
   notification: Notification;
@@ -26,6 +31,8 @@ export function NotificationItem({
     switch (type) {
       case 'price_drop':
         return <TrendingDown className="w-4 h-4 text-emerald-400" />;
+      case 'back_in_stock':
+        return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
       case 'friend_request':
         return <UserPlus className="w-4 h-4 text-blue-400" />;
       case 'friend_accepted':
@@ -42,6 +49,13 @@ export function NotificationItem({
   };
 
   const isUnread = !notification.read_at;
+  const isOfferAlert = notification.type === 'price_drop' || notification.type === 'back_in_stock';
+  const details = isOfferAlert ? getNotificationAlertDetails(notification.payload) : null;
+  const offerPrice = details?.price && details.currency ? formatPrice(details.price, details.currency) : null;
+  const oldPrice = details?.oldPrice && details.currency ? formatPrice(details.oldPrice, details.currency) : null;
+  const savings = details?.savings && details.currency ? formatPrice(details.savings, details.currency) : null;
+  const checkedAt = details?.verifiedAt ? new Date(details.verifiedAt).toLocaleString('en-US', { timeZone: 'UTC' }) : null;
+  const markRead = () => { if (isUnread) onMarkRead(notification.id); };
 
   return (
     <div
@@ -67,6 +81,24 @@ export function NotificationItem({
             {notification.body}
           </p>
         )}
+        {details && (details.variant || details.condition || offerPrice || checkedAt) && <div className="mt-1.5 space-y-0.5 text-[10px] text-muted-foreground">
+          {details.variant && <p>Variant: {details.variant}</p>}
+          {details.condition && <p>Condition: {formatProductCondition(details.condition)}</p>}
+          {offerPrice && <p>Offer: {offerPrice}{oldPrice ? ` · Saved listing: ${oldPrice}` : ''}{savings ? ` · Savings: ${savings}` : ''}</p>}
+          {checkedAt && <p>Retailer page checked {checkedAt} UTC</p>}
+        </div>}
+        {details && (details.offerUrl || details.itemId) && <div className="mt-2 flex flex-wrap gap-3 text-[11px] font-medium">
+          {details.offerUrl && <a href={details.offerUrl} target="_blank" rel="noopener noreferrer"
+            onClick={(event) => { event.stopPropagation(); markRead(); }}
+            className="inline-flex items-center gap-1 text-primary hover:underline">
+            Open retailer offer <ExternalLink className="w-3 h-3" />
+          </a>}
+          {details.itemId && <Link to={`/items/${encodeURIComponent(details.itemId)}`}
+            onClick={(event) => { event.stopPropagation(); markRead(); }}
+            className="text-primary hover:underline">
+            View tracked item
+          </Link>}
+        </div>}
         <span className="text-[10px] text-muted-foreground/80 mt-1 block">
           {timeAgo(notification.created_at)}
         </span>

@@ -179,12 +179,18 @@ export interface Database {
           category: string | null;
           additional_images: string[];
           variant_label: string | null;
+          condition: string;
           price_source: string | null;
           last_offer_search_at: string | null;
+          next_price_alert_check_at: string;
           priority: number;
           notes: string | null;
           status: ItemStatus;
           target_price: number | null;
+          price_drop_percent: number | null;
+          alert_on_any_lower_price: boolean;
+          alert_on_new_cheaper_offer: boolean;
+          alert_on_back_in_stock: boolean;
           position: number;
           product_id: string | null;
           variant_id: string | null;
@@ -212,12 +218,18 @@ export interface Database {
           category?: string | null;
           additional_images?: string[];
           variant_label?: string | null;
+          condition?: string;
           price_source?: string | null;
           last_offer_search_at?: string | null;
+          next_price_alert_check_at?: string;
           priority?: number;
           notes?: string | null;
           status?: ItemStatus;
           target_price?: number | null;
+          price_drop_percent?: number | null;
+          alert_on_any_lower_price?: boolean;
+          alert_on_new_cheaper_offer?: boolean;
+          alert_on_back_in_stock?: boolean;
           position?: number;
           product_id?: string | null;
           variant_id?: string | null;
@@ -243,12 +255,18 @@ export interface Database {
           category?: string | null;
           additional_images?: string[];
           variant_label?: string | null;
+          condition?: string;
           price_source?: string | null;
           last_offer_search_at?: string | null;
+          next_price_alert_check_at?: string;
           priority?: number;
           notes?: string | null;
           status?: ItemStatus;
           target_price?: number | null;
+          price_drop_percent?: number | null;
+          alert_on_any_lower_price?: boolean;
+          alert_on_new_cheaper_offer?: boolean;
+          alert_on_back_in_stock?: boolean;
           position?: number;
           product_id?: string | null;
           variant_id?: string | null;
@@ -484,6 +502,7 @@ export interface Database {
           url: string;
           affiliate_url: string | null;
           last_verified_at: string;
+          created_at: string;
           updated_at: string;
           shipping_known: boolean;
           taxes_known: boolean;
@@ -492,8 +511,10 @@ export interface Database {
           seller: string | null;
           currency_converted_to: string | null;
           converted_price: number | null;
+          converted_total_price: number | null;
           exchange_rate: number | null;
           exchange_rate_at: string | null;
+          exchange_rate_source: string | null;
           last_error: string | null;
           listing_title: string | null;
           image_url: string | null;
@@ -502,6 +523,7 @@ export interface Database {
           color_label: string | null;
           product_match_confidence: number | null;
           match_type: string | null;
+          is_verified: boolean;
         };
         Insert: {
           id?: string;
@@ -523,6 +545,7 @@ export interface Database {
           url: string;
           affiliate_url?: string | null;
           last_verified_at?: string;
+          created_at?: string;
           updated_at?: string;
           shipping_known?: boolean;
           taxes_known?: boolean;
@@ -531,8 +554,10 @@ export interface Database {
           seller?: string | null;
           currency_converted_to?: string | null;
           converted_price?: number | null;
+          converted_total_price?: number | null;
           exchange_rate?: number | null;
           exchange_rate_at?: string | null;
+          exchange_rate_source?: string | null;
           last_error?: string | null;
           listing_title?: string | null;
           image_url?: string | null;
@@ -541,6 +566,7 @@ export interface Database {
           color_label?: string | null;
           product_match_confidence?: number | null;
           match_type?: string | null;
+          is_verified?: boolean;
         };
         Update: {
           price?: number;
@@ -565,8 +591,10 @@ export interface Database {
           seller?: string | null;
           currency_converted_to?: string | null;
           converted_price?: number | null;
+          converted_total_price?: number | null;
           exchange_rate?: number | null;
           exchange_rate_at?: string | null;
+          exchange_rate_source?: string | null;
           last_error?: string | null;
           listing_title?: string | null;
           image_url?: string | null;
@@ -575,6 +603,7 @@ export interface Database {
           color_label?: string | null;
           product_match_confidence?: number | null;
           match_type?: string | null;
+          is_verified?: boolean;
         };
         Relationships: [];
       };
@@ -662,6 +691,87 @@ export interface Database {
         Args: { uid: string };
         Returns: string[];
       };
+      reserve_product_import: {
+        Args: Record<PropertyKey, never>;
+        Returns: boolean;
+      };
+      reserve_interactive_provider_request: {
+        Args: { p_surface: string };
+        Returns: boolean;
+      };
+      claim_due_price_alert_items: {
+        Args: { p_limit?: number };
+        Returns: {
+          id: string;
+          wishlist_id: string;
+          title: string;
+          variant_label: string | null;
+          target_price: number | null;
+          current_price: number | null;
+          price_drop_percent: number | null;
+          alert_on_any_lower_price: boolean;
+          alert_on_new_cheaper_offer: boolean;
+          alert_on_back_in_stock: boolean;
+          currency: string;
+          condition: string;
+          owner_id: string;
+        }[];
+      };
+      save_wishlist_item_once: {
+        Args: {
+          p_wishlist_id: string;
+          p_title: string;
+          p_image_url: string | null;
+          p_additional_images: string[];
+          p_description: string | null;
+          p_category: string | null;
+          p_variant_label: string | null;
+          p_url: string | null;
+          p_store: string | null;
+          p_current_price: number | null;
+          p_original_price: number | null;
+          p_currency: string;
+          p_priority: number;
+          p_notes: string | null;
+          p_target_price: number | null;
+          p_product_id: string | null;
+          p_variant_id: string | null;
+          p_brand: string | null;
+          p_model_number: string | null;
+          p_gtin: string | null;
+          p_is_verified: boolean;
+          p_price_source: string;
+        };
+        Returns: { item_id: string; is_duplicate: boolean }[];
+      };
+      save_wishlist_item_once_with_condition: {
+        Args: {
+          p_wishlist_id: string;
+          p_title: string;
+          p_image_url: string | null;
+          p_additional_images: string[];
+          p_description: string | null;
+          p_category: string | null;
+          p_variant_label: string | null;
+          p_url: string | null;
+          p_store: string | null;
+          p_current_price: number | null;
+          p_original_price: number | null;
+          p_currency: string;
+          p_priority: number;
+          p_notes: string | null;
+          p_target_price: number | null;
+          p_product_id: string | null;
+          p_variant_id: string | null;
+          p_brand: string | null;
+          p_model_number: string | null;
+          p_gtin: string | null;
+          p_is_verified: boolean;
+          p_price_source: string;
+          p_condition: string;
+        };
+        Returns: { item_id: string; is_duplicate: boolean }[];
+      };
       resolve_catalog_product: {
         Args: { p_title: string; p_brand?: string | null; p_model_number?: string | null; p_gtin?: string | null; p_image_url?: string | null };
         Returns: string | null;
@@ -731,6 +841,7 @@ export interface ProductCandidate {
   image_url?: string | null;
   description?: string | null;
   price?: number | null;
+  condition?: string;
   currency?: string;
   store?: string | null;
   url?: string | null;
@@ -800,8 +911,11 @@ export interface FetchedOffer {
   price: number;
   currency: string;
   shipping_cost?: number;
+  shipping_known?: boolean;
   taxes?: number;
+  taxes_known?: boolean;
   total_price?: number | null;
+  total_is_estimated?: boolean;
   condition?: string;
   availability?: string;
   delivery_estimate?: string;
@@ -816,6 +930,7 @@ export interface FetchedProduct {
   image_url: string | null;
   additional_images?: string[];
   price: number | null;
+  price_conflict?: boolean;
   original_price?: number | null;
   discount_percent?: number | null;
   currency: string;
@@ -834,6 +949,7 @@ export interface FetchedProduct {
   variants?: Array<{
     name: string;
     sku?: string;
+    gtin?: string;
     color?: string;
     size?: string;
     capacity?: string;

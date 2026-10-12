@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import type { PricePoint } from '@/types/database';
 import { type Currency, formatPrice } from '@/lib/currency';
-import { summarizePriceHistory } from '@/lib/priceHistory';
+import { getPriceHistoryXPosition, groupPriceHistoryByListing, summarizePriceHistory } from '@/lib/priceHistory';
 
 const ranges = [
   { label: '7D', days: 7 },
@@ -19,20 +19,24 @@ interface PriceChartProps {
 
 export function PriceChart({ pricePoints, currency = 'MAD', className }: PriceChartProps) {
   const [days, setDays] = useState<number>(30);
-  const summary = useMemo(() => summarizePriceHistory(pricePoints, currency, days), [pricePoints, currency, days]);
+  const series = useMemo(() => groupPriceHistoryByListing(pricePoints || []), [pricePoints]);
+  const [selectedSeries, setSelectedSeries] = useState('original');
+  const activeSeries = series.find(({ key }) => key === selectedSeries) || series[0];
+  const now = Date.now();
+  const periodStart = now - days * 24 * 60 * 60 * 1000;
+  const summary = useMemo(() => summarizePriceHistory(activeSeries?.points || [], currency, days, now), [activeSeries, currency, days, now]);
   const { points: history, current, previous, lowest: minPrice, highest: maxPrice, percentChange: change } = summary;
 
   const width = 300;
   const height = 120;
   const paddingX = 20;
   const paddingY = 18;
-  const chartWidth = width - paddingX * 2;
   const chartHeight = height - paddingY * 2;
   const min = minPrice ?? 0;
   const max = maxPrice ?? 0;
   const spread = max - min || Math.max(max * 0.05, 1);
-  const points = history.map((point, index) => ({
-    x: paddingX + (index / Math.max(history.length - 1, 1)) * chartWidth,
+  const points = history.map((point) => ({
+    x: getPriceHistoryXPosition(Date.parse(point.recorded_at), periodStart, now, paddingX, width - paddingX),
     y: height - paddingY - ((Number(point.price) - min) / spread) * chartHeight,
     point,
   }));
@@ -50,7 +54,12 @@ export function PriceChart({ pricePoints, currency = 'MAD', className }: PriceCh
             </button>
           ))}
         </div>
-        <span className="text-[10px] text-muted-foreground">{history.length} observation{history.length === 1 ? '' : 's'} · {currency}</span>
+        <div className="flex items-center gap-2">
+          {series.length > 1 && <select aria-label="Price history listing" value={activeSeries?.key || ''} onChange={(event) => setSelectedSeries(event.target.value)} className="max-w-44 rounded-lg border border-border/50 bg-card px-2 py-1 text-[10px]">
+            {series.map((value) => <option key={value.key} value={value.key}>{value.label}</option>)}
+          </select>}
+          <span className="text-[10px] text-muted-foreground">{history.length} observation{history.length === 1 ? '' : 's'} · {currency}</span>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -83,10 +92,10 @@ export function PriceChart({ pricePoints, currency = 'MAD', className }: PriceCh
             {points.map(({ x, y, point }) => <circle key={point.id} cx={x} cy={y} r="3.5" fill={point.is_verified ? '#fff' : '#fbbf24'} stroke={point.is_verified ? '#a855f7' : '#d97706'} strokeWidth="2"><title>{formatPrice(Number(point.price), currency)} · {new Date(point.recorded_at).toLocaleString()} · {point.is_verified ? 'verified' : 'unverified observation'}</title></circle>)}
           </svg>
           <div className="flex justify-between text-[10px] text-muted-foreground">
-            <span>{new Date(history[0].recorded_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
-            <span>{new Date(history[history.length - 1].recorded_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+            <span>{new Date(periodStart).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+            <span>{new Date(now).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
           </div>
-          <p className="mt-2 text-[10px] text-muted-foreground">Historical price observations · amber points are unverified</p>
+          <p className="mt-2 text-[10px] text-muted-foreground">{activeSeries?.label || 'Price listing'} · amber points are unverified</p>
         </div>
       )}
     </div>

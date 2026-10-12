@@ -9,6 +9,34 @@ export interface PriceHistorySummary {
   percentChange: number | null;
 }
 
+export interface PriceHistorySeries {
+  key: string;
+  label: string;
+  points: PricePoint[];
+}
+
+export function groupPriceHistoryByListing(points: PricePoint[]): PriceHistorySeries[] {
+  const byKey = new Map<string, PriceHistorySeries>();
+  for (const point of points || []) {
+    const key = point.offer_id ? `offer:${point.offer_id}` : 'original';
+    const current = byKey.get(key) || {
+      key,
+      label: point.offer_id ? `${point.store} offer` : `Original listing · ${point.store}`,
+      points: [],
+    };
+    current.points.push(point);
+    byKey.set(key, current);
+  }
+  return [...byKey.values()].sort((a, b) => a.key === 'original' ? -1 : b.key === 'original' ? 1 : a.label.localeCompare(b.label));
+}
+
+export function getPriceHistoryXPosition(timestamp: number, startTime: number, endTime: number, minX: number, maxX: number): number {
+  const span = endTime - startTime;
+  if (!Number.isFinite(timestamp) || !Number.isFinite(span) || span <= 0) return minX;
+  const progress = Math.max(0, Math.min(1, (timestamp - startTime) / span));
+  return minX + progress * (maxX - minX);
+}
+
 export function summarizePriceHistory(points: PricePoint[], currency: string, days: number, now = Date.now()): PriceHistorySummary {
   const cutoff = now - days * 24 * 60 * 60 * 1000;
   const filtered = (points || [])

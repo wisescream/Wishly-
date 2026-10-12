@@ -1,0 +1,8 @@
+# These functions authenticate scheduled calls using the Vault-backed
+# x-price-check-secret header in their handlers. Supabase's platform JWT gate
+# must be disabled so pg_net requests reach those checks.
+[functions.check-prices]
+verify_jwt = false
+
+[functions.refresh-tracked-products]
+verify_jwt = false
