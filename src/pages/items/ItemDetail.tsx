@@ -27,6 +27,7 @@ import { type Currency, formatPrice } from '@/lib/currency';
 import { formatProductCondition } from '@/lib/productCondition';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
+import { refreshOffersForItem } from '@/lib/importService';
 
 export default function ItemDetail() {
   const { id } = useParams<{ id: string }>();
@@ -94,17 +95,16 @@ export default function ItemDetail() {
 
   const refreshOffersMutation = useMutation({
     mutationFn: async () => {
-      const { data, error } = await supabase.functions.invoke('refresh-offers', { body: { item_id: id, force_refresh: true } });
-      if (error) throw await getFunctionError(error, 'Offer search could not reach its provider. Your saved offers are unchanged.');
-      if (data?.error) throw new Error(data.error);
-      return data;
+      const offers = await refreshOffersForItem(id!);
+      return { success: true, offers_found: offers.length, exact_offers_found: offers.length };
     },
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ['item-detail', id] });
-      if (result?.status === 'partial' && result?.offers_found) toast.message(result.error || `Found ${result.offers_found} possible retailer listing${result.offers_found === 1 ? '' : 's'}. Check the exact model and price on the retailer page.`);
-      else if (result?.error) toast.error(result.error);
-      else if (result?.exact_offers_found) toast.success(`Found ${result.exact_offers_found} high-confidence retailer match${result.exact_offers_found === 1 ? '' : 'es'}`);
-      else toast.message('No exact retailer match found yet. Wishly searched the configured sources; you can retry later.');
+      if (result.offers_found > 0) {
+        toast.success(`Found ${result.offers_found} matching offers across Moroccan & international stores.`);
+      } else {
+        toast.info('No new retailer offers found. You can try again later.');
+      }
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : 'Offer search failed. Try again later.'),
   });

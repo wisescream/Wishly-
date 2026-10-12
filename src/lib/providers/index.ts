@@ -1,5 +1,6 @@
 import type { ProviderAdapter } from "./types";
 import { InternalCatalogProvider } from "./InternalCatalogProvider";
+import { MoroccanRetailersProvider } from "./MoroccanRetailersProvider";
 import { UpcItemDbProvider } from "./UpcItemDbProvider";
 import { OpenFoodFactsProvider } from "./OpenFoodFactsProvider";
 import { GoogleShoppingProvider } from "./GoogleShoppingProvider";
@@ -8,6 +9,7 @@ import { evaluateProductMatch } from "../matching/productMatcher";
 
 export const activeProviders: ProviderAdapter[] = [
   InternalCatalogProvider,
+  MoroccanRetailersProvider,
   UpcItemDbProvider,
   OpenFoodFactsProvider,
   GoogleShoppingProvider,

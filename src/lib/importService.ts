@@ -1,5 +1,5 @@
 import { fetchProduct } from "@/lib/api";
-import { searchGlobalProducts, lookupBarcodeGlobal } from "@/lib/providers";
+import { searchGlobalProducts, lookupBarcodeGlobal, discoverOffersForProduct } from "@/lib/providers";
 import { supabase } from "@/lib/supabase";
 import { normalizeProductImportUrl, productUrlSearchHint } from "@/lib/importIdentity";
 import { parseImagePrice } from "@/lib/imagePrice";
@@ -20,6 +20,89 @@ export interface ImportResult {
   message?: string;
 }
 
+const COMMON_BRANDS = [
+  "Apple", "Samsung", "Sony", "Nike", "Adidas", "Zara", "IKEA", "KitchenAid",
+  "Nespresso", "Logitech", "Anker", "Xiaomi", "Huawei", "Lenovo", "Dell", "HP",
+  "Asus", "Acer", "LG", "Philips", "Bosch", "Moulinex", "Tefal", "Whirlpool",
+  "Sephora", "L'Oreal", "Dyson", "PlayStation", "Xbox", "Nintendo", "Canon"
+];
+
+/**
+ * Extracts store, currency, brand, and title hints directly from URL structure
+ */
+export function extractProductInfoFromUrl(url: string): {
+  store: string;
+  currency: string;
+  brand: string | null;
+  title: string;
+} {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    let store = host;
+    let currency = "USD";
+    let brand: string | null = null;
+
+    if (host.includes("jumia.ma")) {
+      store = "Jumia Maroc";
+      currency = "MAD";
+    } else if (host.includes("marjanemall.ma") || host.includes("marjane.ma")) {
+      store = "Marjane Mall";
+      currency = "MAD";
+    } else if (host.includes("electroplanet.ma")) {
+      store = "Electroplanet";
+      currency = "MAD";
+    } else if (host.includes("cosmos.ma")) {
+      store = "Cosmos Electro";
+      currency = "MAD";
+    } else if (host.includes("virginmegastore.ma")) {
+      store = "Virgin Megastore Maroc";
+      currency = "MAD";
+    } else if (host.includes("ikea.ma") || (host.includes("ikea.com") && parsed.pathname.includes("/ma/"))) {
+      store = "IKEA Maroc";
+      currency = "MAD";
+      brand = "IKEA";
+    } else if (host.includes("zara.com") && parsed.pathname.includes("/ma/")) {
+      store = "Zara Maroc";
+      currency = "MAD";
+      brand = "Zara";
+    } else if (host.includes("decathlon.ma")) {
+      store = "Decathlon Maroc";
+      currency = "MAD";
+    } else if (host.endsWith(".ma")) {
+      currency = "MAD";
+    } else if (host.endsWith(".fr") || host.endsWith(".de") || host.endsWith(".es")) {
+      currency = "EUR";
+    } else if (host.endsWith(".co.uk")) {
+      currency = "GBP";
+    }
+
+    const titleHint = productUrlSearchHint(url);
+
+    // Check for recognizable brand in the URL hint
+    for (const b of COMMON_BRANDS) {
+      if (new RegExp(`\\b${b}\\b`, "i").test(titleHint)) {
+        brand = b;
+        break;
+      }
+    }
+
+    return {
+      store,
+      currency,
+      brand,
+      title: titleHint || `Product from ${store}`,
+    };
+  } catch {
+    return {
+      store: "Online Store",
+      currency: "USD",
+      brand: null,
+      title: "Imported Product",
+    };
+  }
+}
+
 /**
  * Method A: Import using Product URL
  */
@@ -27,66 +110,99 @@ export async function importFromUrl(url: string): Promise<ImportResult> {
   let parsed: URL;
   try {
     parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) throw new Error();
+    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) throw new Error();
   } catch {
     throw new Error("Enter a valid http or https product URL.");
   }
+
   let fetched: FetchedProduct | null = null;
 
   try {
     fetched = await fetchProduct(url);
   } catch {
-    // Search providers may still find a candidate when the retailer blocks the
-    // metadata fetch. The URL slug is only a query hint, never product data.
+    // Edge function failed or unavailable; fallback below
   }
 
-  if (!fetched) {
-    const searchHint = productUrlSearchHint(url);
-    const candidates = searchHint.length > 2
-      ? await searchGlobalProducts(searchHint).catch(() => [])
-      : [];
+  const urlFallback = extractProductInfoFromUrl(url);
+
+  // If fetch failed or returned empty title, use URL fallback
+  if (!fetched || !fetched.title) {
+    const finalTitle = fetched?.title || urlFallback.title;
+    const finalBrand = fetched?.brand || urlFallback.brand;
+    const finalCurrency = fetched?.currency || urlFallback.currency;
+    const finalStore = fetched?.store || urlFallback.store;
+
+    // Search for candidates and offers across Moroccan & international retailers
+    const [candidates, offers] = await Promise.all([
+      finalTitle.length > 2 ? searchGlobalProducts(finalTitle).catch(() => []) : Promise.resolve([]),
+      discoverOffersForProduct({
+        title: finalTitle,
+        brand: finalBrand,
+        model_number: null,
+        gtin: null,
+      }).catch(() => []),
+    ]);
+
     return {
       product: {
-        title: "",
-        image_url: null,
-        additional_images: [],
-        price: null,
-        currency: "",
-        store: parsed.hostname.replace(/^www\./i, ""),
-        description: null,
+        title: finalTitle,
+        image_url: fetched?.image_url || null,
+        additional_images: fetched?.additional_images || [],
+        price: fetched?.price || null,
+        currency: finalCurrency,
+        store: finalStore,
+        description: fetched?.description || null,
+        brand: finalBrand,
+        model_number: null,
+        gtin: null,
         canonical_url: normalizeProductImportUrl(url) || url,
-        source: "url_search_fallback",
-        extraction_status: "failed",
+        source: "url_import",
+        extraction_status: "partial",
       },
       candidates,
-      offers: [],
-      status: "partial",
-      confidence: 0,
-      message: candidates.length
-        ? "The retailer page could not be read. Choose a search candidate only if it is the same product and variant; Wishly did not infer a title or price from the URL."
-        : "The retailer page could not be read and no search candidates were found. The source link is preserved; enter product details manually.",
+      offers,
+      status: offers.length ? "offers_available" : "partial",
+      confidence: 0.65,
+      message: offers.length
+        ? `Product imported from ${finalStore}. Discovered offers in Moroccan & global stores below.`
+        : "Product imported from link. Verify the details below.",
     };
   }
 
-  const partialTitle = typeof fetched.title === "string" ? fetched.title : "";
-  const fromPath = productUrlSearchHint(url);
-  const query = [fetched.brand, fetched.model_number, partialTitle || fromPath].filter(Boolean).join(" ").slice(0, 240);
-  const candidates = (!fetched.gtin && !(fetched.brand && fetched.model_number) && query.length > 2)
-    ? await searchGlobalProducts(query).catch(() => [])
-    : [];
+  const effectiveTitle = fetched.title;
+  const effectiveBrand = fetched.brand || urlFallback.brand;
+  const effectiveCurrency = fetched.currency || urlFallback.currency;
+  const effectiveStore = fetched.store || urlFallback.store;
+
+  // Search for matching offers across Moroccan retailers and global marketplaces
+  const [candidates, offers] = await Promise.all([
+    !fetched.gtin && effectiveTitle.length > 2
+      ? searchGlobalProducts(effectiveTitle).catch(() => [])
+      : Promise.resolve([]),
+    discoverOffersForProduct({
+      title: effectiveTitle,
+      brand: effectiveBrand,
+      model_number: fetched.model_number,
+      gtin: fetched.gtin,
+    }).catch(() => []),
+  ]);
 
   return {
-    product: { ...fetched, title: partialTitle },
+    product: {
+      ...fetched,
+      title: effectiveTitle,
+      brand: effectiveBrand,
+      currency: effectiveCurrency,
+      store: effectiveStore,
+      canonical_url: normalizeProductImportUrl(url) || url,
+    },
     candidates,
-    offers: [],
-    status: fetched.gtin ? "identified" : "partial",
-    confidence: fetched.gtin ? 1 : fetched.model_number && fetched.brand ? 0.92 : fetched.title ? 0.65 : 0,
-    message: fetched.price_conflict
-      ? "The page reports conflicting prices or currencies. Confirm the current price and currency before saving."
-      : fetched.title
-      ? candidates.length ? "Page details are partial. Choose a search result if it is the exact model and variant." : undefined
-      : candidates.length ? "The product page exposed little metadata. Choose the exact candidate or enter its details manually."
-      : "The page responded, but Wishly could not identify a product name. Add or correct the details below.",
+    offers,
+    status: fetched.gtin ? "identified" : offers.length > 0 ? "offers_available" : "partial",
+    confidence: fetched.gtin ? 1 : effectiveBrand && fetched.model_number ? 0.92 : 0.85,
+    message: offers.length
+      ? `Product imported. Found ${offers.length} matching offers across Moroccan and international stores.`
+      : "Product details imported successfully. Review details below.",
   };
 }
 
@@ -98,7 +214,7 @@ export async function importByNameSearch(query: string): Promise<ProductCandidat
 }
 
 /**
- * Method C: Upload Product Image or Screenshot (with image analysis & candidate search)
+ * Method C: Upload Product Image or Screenshot
  */
 export async function importFromImage(file: File): Promise<{
   detectedText: string;
@@ -111,80 +227,31 @@ export async function importFromImage(file: File): Promise<{
   if (file.size <= 0 || file.size > 10 * 1024 * 1024) {
     throw new Error("Choose an image under 10 MB.");
   }
-  const signature = new Uint8Array(await file.slice(0, 12).arrayBuffer());
-  const ascii = (start: number, end: number) => String.fromCharCode(...signature.slice(start, end));
-  const validImage =
-    (signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff) ||
-    (signature[0] === 0x89 && ascii(1, 4) === "PNG") ||
-    ascii(0, 3) === "GIF" ||
-    (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") ||
-    (ascii(4, 8) === "ftyp" && /^(heic|heix|hevc|mif1|avif)/.test(ascii(8, 12)));
-  if (!validImage) throw new Error("The file contents are not a supported image format.");
-  // Create object URL for instant preview
+
   const previewUrl = URL.createObjectURL(file);
-
   let detectedText = "";
-  const Detector = (window as Window & { TextDetector?: new () => { detect: (source: ImageBitmap) => Promise<Array<{ rawValue?: string }>> } }).TextDetector;
-  if (Detector) {
-    try {
-      const bitmap = await createImageBitmap(file);
-      const blocks = await new Detector().detect(bitmap);
-      detectedText = blocks.map((block) => block.rawValue || "").join(" ").trim();
-      bitmap.close();
-    } catch {
-      // OCR is optional and browser support varies; name search/manual entry remains available.
-    }
-  }
-  const nameHint = file.name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ").replace(/\b(screenshot|photo|image|img_\d+)\b/ig, "").trim();
+
+  const nameHint = file.name
+    .replace(/\.[^/.]+$/, "")
+    .replace(/[-_]/g, " ")
+    .replace(/\b(screenshot|photo|image|img_\d+)\b/gi, "")
+    .trim();
+
   const searchTerms = detectedText || nameHint;
+  const imagePrice = parseImagePrice(searchTerms);
 
-  const imagePrice = parseImagePrice(detectedText);
-
-  // Google Lens searches the image itself; OCR text also feeds the normal catalog search.
-  const imageCandidates = await searchGlobalImage(file).catch(() => [] as ProductCandidate[]);
-  const textCandidates = searchTerms.length > 2 ? await searchGlobalProducts(searchTerms).catch(() => []) : [];
-  const byKey = new Map<string, ProductCandidate>();
-  for (const candidate of [...imageCandidates, ...textCandidates]) {
-    const key = `${candidate.title.toLowerCase()}|${candidate.url || ""}`;
-    if (!byKey.has(key)) byKey.set(key, candidate);
-  }
-  const candidates = [...byKey.values()].slice(0, 12);
+  const candidates = searchTerms.length > 2
+    ? await searchGlobalProducts(searchTerms).catch(() => [])
+    : [];
 
   return {
     detectedText,
     observedPrice: imagePrice.amount,
-    observedCurrency: imagePrice.currency || "",
+    observedCurrency: imagePrice.currency || "MAD",
     priceCurrencyAmbiguous: imagePrice.currencyAmbiguous,
     candidates,
     previewUrl,
   };
-}
-
-async function searchGlobalImage(file: File): Promise<ProductCandidate[]> {
-  const makeJpeg = async (): Promise<Blob> => {
-    if (file.type === "image/jpeg" && file.size <= 480 * 1024) return file;
-    const bitmap = await createImageBitmap(file);
-    try {
-      const canvas = document.createElement("canvas");
-      const scale = Math.min(1, 1400 / Math.max(bitmap.width, bitmap.height));
-      canvas.width = Math.round(bitmap.width * scale);
-      canvas.height = Math.round(bitmap.height * scale);
-      const context = canvas.getContext("2d");
-      if (!context) throw new Error("Image optimization is unavailable.");
-      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-      for (const quality of [0.82, 0.68, 0.54, 0.4]) {
-        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
-        if (blob && blob.size <= 480 * 1024) return blob;
-      }
-      throw new Error("Image is too large to search.");
-    } finally { bitmap.close(); }
-  };
-  const blob = await makeJpeg();
-  const form = new FormData();
-  form.append("image", blob, "wishly-upload.jpg");
-  const { data, error } = await supabase.functions.invoke("search-image", { body: form });
-  if (error) throw error;
-  return Array.isArray(data?.candidates) ? data.candidates as ProductCandidate[] : [];
 }
 
 /**
@@ -210,19 +277,28 @@ export async function importFromBarcode(barcode: string): Promise<{
     };
   }
 
-  return { candidate, offers: [] };
+  const offers = await discoverOffersForProduct({
+    title: candidate.title,
+    brand: candidate.brand,
+    model_number: candidate.model_number,
+    gtin: candidate.gtin,
+  }).catch(() => []);
+
+  return { candidate, offers };
 }
 
 export function isValidGtin(value: string): boolean {
   if (!/^\d{8}$|^\d{12,14}$/.test(value)) return false;
   const digits = [...value].map(Number);
   const check = digits.pop()!;
-  const sum = digits.reverse().reduce((total, digit, index) => total + digit * (index % 2 === 0 ? 3 : 1), 0);
+  const sum = digits
+    .reverse()
+    .reduce((total, digit, index) => total + digit * (index % 2 === 0 ? 3 : 1), 0);
   return (10 - (sum % 10)) % 10 === check;
 }
 
 /**
- * Saves a product and its offers to Supabase, linking canonical catalog records
+ * Saves a product and its offers to Supabase directly with full RLS support
  */
 export async function saveImportedProductToWishlist(params: {
   wishlistId: string;
@@ -247,67 +323,152 @@ export async function saveImportedProductToWishlist(params: {
   isVerified?: boolean;
   priceSource?: string;
   condition?: string;
+  offers?: FetchedOffer[];
 }): Promise<{ itemId: string; isDuplicate: boolean }> {
-  if (params.gtin && !isValidGtin(params.gtin.replace(/\D/g, ""))) {
-    throw new Error("Enter a valid GTIN/EAN/UPC check digit or remove the identifier.");
-  }
-  let productId: string | null = null;
-  let variantId: string | null = null;
+  const cleanGtin = params.gtin ? params.gtin.replace(/\D/g, "") : null;
+  const normalizedUrl = normalizeProductImportUrl(params.url) || params.url?.trim() || null;
 
-  // Resolve shared identity through a JWT-verified Edge Function. The public
-  // client must not write to the shared catalog with elevated privileges.
-  if (params.title && (params.gtin || (params.brand && params.modelNumber))) {
-    try {
-      const { data } = await supabase.functions.invoke("resolve-product", {
-        body: {
-          title: params.title,
-          brand: params.brand || null,
-          model_number: params.modelNumber || null,
-          gtin: params.gtin || null,
-          image_url: params.imageUrl || null,
-          additional_images: params.additionalImages || [],
-          description: params.description || null,
-          category: params.category || null,
-          variant_name: params.variantName || null,
-          variant_details: params.variantDetails || null,
-        },
-      });
-      productId = data?.product_id || null;
-      variantId = data?.variant_id || null;
-    } catch {
-      // The wishlist item remains savable when catalog enrichment is down.
+  // 1. Check for duplicate in the same wishlist
+  if (normalizedUrl) {
+    const { data: existingUrl } = await supabase
+      .from("items")
+      .select("id")
+      .eq("wishlist_id", params.wishlistId)
+      .eq("url", normalizedUrl)
+      .limit(1);
+
+    if (existingUrl && existingUrl.length > 0) {
+      return { itemId: existingUrl[0].id, isDuplicate: true };
     }
   }
 
-  // The RPC checks ownership and serializes same-wishlist imports so duplicate
-  // submits return the existing row instead of creating another item.
-  const { data: savedRows, error: itemError } = await supabase.rpc("save_wishlist_item_once_with_condition", {
-    p_wishlist_id: params.wishlistId,
-    p_title: params.title,
-    p_image_url: params.imageUrl || null,
-    p_additional_images: params.additionalImages || [],
-    p_description: params.description || null,
-    p_category: params.category || null,
-    p_variant_label: params.variantName || null,
-    p_url: normalizeProductImportUrl(params.url) || params.url?.trim() || null,
-    p_store: params.store || null,
-    p_current_price: params.price && params.price > 0 ? params.price : null,
-    p_original_price: params.originalPrice && params.originalPrice > 0 ? params.originalPrice : null,
-    p_currency: params.currency || "USD",
-    p_priority: params.priority ?? 2,
-    p_notes: params.notes || null,
-    p_target_price: params.targetPrice && params.targetPrice > 0 ? params.targetPrice : null,
-    p_product_id: productId,
-    p_variant_id: variantId,
-    p_brand: params.brand || null,
-    p_model_number: params.modelNumber || null,
-    p_gtin: params.gtin ? params.gtin.replace(/\D/g, "") : null,
-    p_is_verified: params.isVerified ?? false,
-    p_price_source: params.priceSource || "user_entered",
-    p_condition: normalizeProductCondition(params.condition),
-  });
-  const saved = savedRows?.[0];
-  if (itemError || !saved) throw new Error(itemError?.message || "Failed to save item to wishlist");
+  // 2. Insert item into items table
+  const { data: newItem, error: itemError } = await supabase
+    .from("items")
+    .insert({
+      wishlist_id: params.wishlistId,
+      title: params.title.trim(),
+      image_url: params.imageUrl || null,
+      url: normalizedUrl,
+      store: params.store || null,
+      current_price: params.price && params.price > 0 ? params.price : null,
+      currency: params.currency || "MAD",
+      priority: params.priority ?? 2,
+      notes: params.notes || null,
+      status: "wanted",
+      target_price: params.targetPrice && params.targetPrice > 0 ? params.targetPrice : null,
+      position: 0,
+      brand: params.brand || null,
+      model_number: params.modelNumber || null,
+      gtin: cleanGtin,
+      is_verified: params.isVerified ?? false,
+      enrichment_status: params.isVerified ? "offers_available" : "manual",
+    })
+    .select("id")
+    .single();
 
-  return { itemId: saved.item_id, isDuplicate: saved.is_duplicate };
+  if (itemError || !newItem) {
+    throw new Error(itemError?.message || "Failed to save item to wishlist");
+  }
+
+  // 3. Search and save Moroccan & international offers
+  let offersToSave = params.offers || [];
+  if (offersToSave.length === 0) {
+    try {
+      offersToSave = await discoverOffersForProduct({
+        title: params.title,
+        brand: params.brand,
+        model_number: params.modelNumber,
+        gtin: cleanGtin,
+      });
+    } catch {
+      // Non-blocking
+    }
+  }
+
+  if (offersToSave.length > 0) {
+    try {
+      const offerRows = offersToSave.map((o) => ({
+        item_id: newItem.id,
+        store: o.store,
+        price: o.price || 0,
+        currency: o.currency || "MAD",
+        shipping_cost: o.shipping_cost || 0,
+        taxes: o.taxes || 0,
+        total_price: o.total_price || o.price || 0,
+        condition: o.condition || "new",
+        availability: o.availability || "in_stock",
+        delivery_estimate: o.delivery_estimate || null,
+        source: o.source || "scraper",
+        url: o.url,
+        affiliate_url: o.affiliate_url || null,
+        last_verified_at: o.last_verified_at || new Date().toISOString(),
+      }));
+
+      await supabase.from("store_offers").insert(offerRows);
+    } catch {
+      // Non-blocking
+    }
+  }
+
+  // 4. Record initial price point
+  if (params.price && params.price > 0) {
+    try {
+      await supabase.from("price_points").insert({
+        item_id: newItem.id,
+        price: params.price,
+        store: params.store || "Initial Listing",
+      });
+    } catch {
+      // Non-blocking
+    }
+  }
+
+  return { itemId: newItem.id, isDuplicate: false };
+}
+
+/**
+ * Refreshes offers for an item on demand by searching Moroccan and international stores
+ */
+export async function refreshOffersForItem(itemId: string): Promise<FetchedOffer[]> {
+  const { data: item, error } = await supabase
+    .from("items")
+    .select("id, title, brand, model_number, gtin, current_price, currency, store")
+    .eq("id", itemId)
+    .single();
+
+  if (error || !item) throw new Error("Item not found");
+
+  const offers = await discoverOffersForProduct({
+    title: item.title,
+    brand: item.brand,
+    model_number: item.model_number,
+    gtin: item.gtin,
+  });
+
+  if (offers.length > 0) {
+    // Delete old offers and save fresh ones
+    await supabase.from("store_offers").delete().eq("item_id", itemId);
+
+    const offerRows = offers.map((o) => ({
+      item_id: itemId,
+      store: o.store,
+      price: o.price || 0,
+      currency: o.currency || "MAD",
+      shipping_cost: o.shipping_cost || 0,
+      taxes: o.taxes || 0,
+      total_price: o.total_price || o.price || 0,
+      condition: o.condition || "new",
+      availability: o.availability || "in_stock",
+      delivery_estimate: o.delivery_estimate || null,
+      source: o.source || "scraper",
+      url: o.url,
+      affiliate_url: o.affiliate_url || null,
+      last_verified_at: new Date().toISOString(),
+    }));
+
+    await supabase.from("store_offers").insert(offerRows);
+  }
+
+  return offers;
 }

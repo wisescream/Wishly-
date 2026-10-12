@@ -72,6 +72,14 @@ CREATE TABLE items (
   status item_status DEFAULT 'wanted',
   target_price NUMERIC,
   position INTEGER DEFAULT 0,
+  brand TEXT,
+  model_number TEXT,
+  gtin TEXT,
+  variant_name TEXT,
+  description TEXT,
+  category TEXT,
+  is_verified BOOLEAN DEFAULT false,
+  enrichment_status TEXT DEFAULT 'manual',
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -91,8 +99,17 @@ CREATE TABLE store_offers (
   item_id UUID NOT NULL REFERENCES items(id) ON DELETE CASCADE,
   store TEXT NOT NULL,
   price NUMERIC NOT NULL,
+  currency TEXT DEFAULT 'MAD',
+  shipping_cost NUMERIC DEFAULT 0,
+  taxes NUMERIC DEFAULT 0,
+  total_price NUMERIC,
+  condition TEXT DEFAULT 'new',
+  availability TEXT DEFAULT 'in_stock',
+  delivery_estimate TEXT,
+  source TEXT DEFAULT 'manual',
   url TEXT NOT NULL,
   affiliate_url TEXT,
+  last_verified_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE(item_id, store)
 );
@@ -280,8 +297,17 @@ CREATE POLICY price_points_insert ON price_points FOR INSERT WITH CHECK (
   item_id IN (SELECT id FROM items WHERE wishlist_id IN (SELECT id FROM wishlists WHERE owner_id = auth.uid()))
 );
 
--- STORE_OFFERS: Read by all
+-- STORE_OFFERS: Read by all, write by list owner
 CREATE POLICY store_offers_read ON store_offers FOR SELECT USING (true);
+CREATE POLICY store_offers_insert ON store_offers FOR INSERT WITH CHECK (
+  item_id IN (SELECT id FROM items WHERE wishlist_id IN (SELECT id FROM wishlists WHERE owner_id = auth.uid()))
+);
+CREATE POLICY store_offers_update ON store_offers FOR UPDATE USING (
+  item_id IN (SELECT id FROM items WHERE wishlist_id IN (SELECT id FROM wishlists WHERE owner_id = auth.uid()))
+);
+CREATE POLICY store_offers_delete ON store_offers FOR DELETE USING (
+  item_id IN (SELECT id FROM items WHERE wishlist_id IN (SELECT id FROM wishlists WHERE owner_id = auth.uid()))
+);
 
 -- RESERVATIONS: Reserver sees their own only, owner NEVER sees
 CREATE POLICY reservations_own ON reservations FOR ALL USING (auth.uid() = reserver_id);
