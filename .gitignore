@@ -30,10 +30,8 @@ dist-ssr
 .env.test.local
 .env.production.local
 
-# Deployment scripts with tokens
-deploy.sh
+# Local deployment helpers that may read ignored .env credentials
 deploy-vercel.sh
-run-migrations.sh
 sync-keys.sh
 .vercel
 .env*

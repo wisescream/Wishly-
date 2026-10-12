@@ -2,7 +2,8 @@
 -- up by the scheduled worker. Retry failed provider calls with bounded backoff.
 ALTER TABLE public.items
   ADD COLUMN IF NOT EXISTS offer_search_attempts INTEGER NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS next_offer_search_at TIMESTAMPTZ;
+  ADD COLUMN IF NOT EXISTS next_offer_search_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE public.items ALTER COLUMN next_offer_search_at SET DEFAULT now();
 
 -- Preserve the existing six-hour cadence for products already checked before

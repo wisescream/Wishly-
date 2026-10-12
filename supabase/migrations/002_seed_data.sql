@@ -6,7 +6,8 @@ INSERT INTO auth.users (id, instance_id, role, aud, email, raw_user_meta_data, c
 VALUES 
   ('11111111-1111-1111-1111-111111111111', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'amina@demo.ma', '{"username": "amina_design", "display_name": "Amina B.", "avatar_url": "https://i.pravatar.cc/150?u=amina"}', now(), now()),
   ('22222222-2222-2222-2222-222222222222', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'youssef@demo.ma', '{"username": "youssef.tech", "display_name": "Youssef Tech", "avatar_url": "https://i.pravatar.cc/150?u=youssef"}', now(), now()),
-  ('33333333-3333-3333-3333-333333333333', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'fatima@demo.ma', '{"username": "fatima.z", "display_name": "Fatima Zahra", "avatar_url": "https://i.pravatar.cc/150?u=fatima"}', now(), now());
+  ('33333333-3333-3333-3333-333333333333', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'fatima@demo.ma', '{"username": "fatima.z", "display_name": "Fatima Zahra", "avatar_url": "https://i.pravatar.cc/150?u=fatima"}', now(), now())
+ON CONFLICT (id) DO NOTHING;
 
 -- Update profiles created by the trigger to add MA specific details
 UPDATE profiles SET country = 'MA', currency = 'MAD' WHERE id IN (
@@ -20,7 +21,8 @@ INSERT INTO style_profiles (user_id, clothing_sizes, shoe_size, brands, colors, 
 VALUES
   ('11111111-1111-1111-1111-111111111111', '{"top": "M", "bottom": "M"}', '38', '{"Zara", "Mango", "IKEA"}', '{"Beige", "White", "Earth tones"}', 100, 2000),
   ('22222222-2222-2222-2222-222222222222', '{"top": "L", "bottom": "L"}', '42', '{"Apple", "Sony", "Nike"}', '{"Black", "Grey"}', 500, 10000),
-  ('33333333-3333-3333-3333-333333333333', '{"top": "S", "bottom": "S"}', '37', '{"Sephora", "Flormar"}', '{"Pink", "Gold"}', 50, 1000);
+  ('33333333-3333-3333-3333-333333333333', '{"top": "S", "bottom": "S"}', '37', '{"Sephora", "Flormar"}', '{"Pink", "Gold"}', 50, 1000)
+ON CONFLICT (user_id) DO NOTHING;
 
 -- Wishlists
 INSERT INTO wishlists (id, owner_id, name, slug, occasion, event_date, privacy)
@@ -30,7 +32,8 @@ VALUES
   ('b1111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Tech Setup Upgrade', 'tech-setup', 'Personal', NULL, 'public'),
   ('b2222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222', 'Gaming Gear', 'gaming-gear', 'Personal', NULL, 'friends'),
   ('c1111111-1111-1111-1111-111111111111', '33333333-3333-3333-3333-333333333333', 'Wedding Registry', 'wedding-registry', 'Wedding', '2024-09-10', 'public'),
-  ('c2222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', 'Summer Wardrobe', 'summer-wardrobe', 'Personal', NULL, 'private');
+  ('c2222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', 'Summer Wardrobe', 'summer-wardrobe', 'Personal', NULL, 'private')
+ON CONFLICT (id) DO NOTHING;
 
 -- Items
 INSERT INTO items (id, wishlist_id, title, store, current_price, currency, url, image_url)
@@ -43,14 +46,16 @@ VALUES
   ('d2222222-2222-2222-2222-222222222222', 'b1111111-1111-1111-1111-111111111111', 'Logitech MX Master 3S', 'Jumia', 1250.00, 'MAD', 'https://www.jumia.ma/', 'https://ma.jumia.is/unsafe/fit-in/500x500/filters:fill(white)/product/84/647415/1.jpg'),
   -- Fatima's Wedding
   ('d3333333-3333-3333-3333-333333333331', 'c1111111-1111-1111-1111-111111111111', 'KitchenAid Artisan Mixer', 'Marjane', 5999.00, 'MAD', 'https://www.marjane.ma/', 'https://marjanemall.ma/media/catalog/product/k/i/kitchenaid-artisan.jpg'),
-  ('d3333333-3333-3333-3333-333333333332', 'c1111111-1111-1111-1111-111111111111', 'Nespresso Essenza Mini', 'Nespresso Maroc', 1190.00, 'MAD', 'https://ma.buynespresso.com/', 'https://www.nespresso.com/ecom/medias/sys_master/public/1246182104332/C-Essenza-Mini-Black-Front-Reflection.jpg');
+  ('d3333333-3333-3333-3333-333333333332', 'c1111111-1111-1111-1111-111111111111', 'Nespresso Essenza Mini', 'Nespresso Maroc', 1190.00, 'MAD', 'https://ma.buynespresso.com/', 'https://www.nespresso.com/ecom/medias/sys_master/public/1246182104332/C-Essenza-Mini-Black-Front-Reflection.jpg')
+ON CONFLICT (id) DO NOTHING;
 
 -- Friendships
 INSERT INTO friendships (requester_id, addressee_id, status)
 VALUES
   ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'accepted'),
   ('22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', 'accepted'),
-  ('11111111-1111-1111-1111-111111111111', '33333333-3333-3333-3333-333333333333', 'pending');
+  ('11111111-1111-1111-1111-111111111111', '33333333-3333-3333-3333-333333333333', 'pending')
+ON CONFLICT (requester_id, addressee_id) DO NOTHING;
 
 -- Price Points (History)
 INSERT INTO price_points (item_id, price, store, recorded_at, observation_day)
@@ -71,12 +76,27 @@ WHERE NOT EXISTS (
 
 -- Store Offers
 INSERT INTO store_offers (item_id, store, price, url)
-VALUES
-  ('d2222222-2222-2222-2222-222222222221', 'Jumia', 3850.00, 'https://www.jumia.ma/sony-wh-1000xm5'),
-  ('d2222222-2222-2222-2222-222222222221', 'Virgin Megastore', 4199.00, 'https://virginmegastore.ma/sony');
+SELECT seed.item_id, seed.store, seed.price, seed.url
+FROM (VALUES
+  ('d2222222-2222-2222-2222-222222222221'::uuid, 'Jumia'::text, 3850.00::numeric, 'https://www.jumia.ma/sony-wh-1000xm5'::text),
+  ('d2222222-2222-2222-2222-222222222221'::uuid, 'Virgin Megastore'::text, 4199.00::numeric, 'https://virginmegastore.ma/sony'::text)
+) AS seed(item_id, store, price, url)
+WHERE NOT EXISTS (
+  SELECT 1 FROM store_offers existing
+  WHERE existing.item_id = seed.item_id AND existing.url = seed.url
+);
 
 -- Notifications
 INSERT INTO notifications (user_id, type, title, body)
-VALUES
-  ('22222222-2222-2222-2222-222222222222', 'price_drop', 'Price dropped for Sony WH-1000XM5!', 'The price decreased from 4100 MAD to 3999 MAD at Electroplanet.'),
-  ('33333333-3333-3333-3333-333333333333', 'friend_request', 'New friend request', 'Amina B. sent you a friend request.');
+SELECT seed.user_id, seed.type, seed.title, seed.body
+FROM (VALUES
+  ('22222222-2222-2222-2222-222222222222'::uuid, 'price_drop'::text, 'Price dropped for Sony WH-1000XM5!'::text, 'The price decreased from 4100 MAD to 3999 MAD at Electroplanet.'::text),
+  ('33333333-3333-3333-3333-333333333333'::uuid, 'friend_request'::text, 'New friend request'::text, 'Amina B. sent you a friend request.'::text)
+) AS seed(user_id, type, title, body)
+WHERE NOT EXISTS (
+  SELECT 1 FROM notifications existing
+  WHERE existing.user_id = seed.user_id
+    AND existing.type = seed.type
+    AND existing.title = seed.title
+    AND existing.body = seed.body
+);
