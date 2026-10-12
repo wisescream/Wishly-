@@ -386,24 +386,24 @@ ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO items (id, wishlist_id, title, store, current_price, currency, url, image_url)
 VALUES
-  ('i1111111-1111-1111-1111-111111111111', 'a1111111-1111-1111-1111-111111111111', 'STRANDMON Wing chair', 'IKEA Maroc', 2495.00, 'MAD', 'https://www.ikea.ma/en/products/living-room/armchairs', 'https://images.unsplash.com/photo-1567538096630-e0c55bd6374c?w=500'),
-  ('i1111111-1111-1111-1111-111111111112', 'a1111111-1111-1111-1111-111111111111', 'Ceramic Minimalist Vase', 'Zara Home', 399.00, 'MAD', 'https://www.zarahome.com/ma/', 'https://images.unsplash.com/photo-1578749556568-bc2c40e68b61?w=500'),
-  ('i2222222-2222-2222-2222-222222222221', 'b1111111-1111-1111-1111-111111111111', 'Sony WH-1000XM5 Wireless Headphones', 'Electroplanet', 3999.00, 'MAD', 'https://www.electroplanet.ma/', 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=500'),
-  ('i2222222-2222-2222-2222-222222222222', 'b1111111-1111-1111-1111-111111111111', 'Logitech MX Master 3S', 'Jumia', 1250.00, 'MAD', 'https://www.jumia.ma/', 'https://images.unsplash.com/photo-1527864550417-7fd91fc51a46?w=500'),
-  ('i3333333-3333-3333-3333-333333333331', 'c1111111-1111-1111-1111-111111111111', 'KitchenAid Artisan Stand Mixer', 'Marjane', 5999.00, 'MAD', 'https://www.marjane.ma/', 'https://images.unsplash.com/photo-1594385208974-2e75f8d7bb48?w=500'),
-  ('i3333333-3333-3333-3333-333333333332', 'c1111111-1111-1111-1111-111111111111', 'Nespresso Essenza Mini Black', 'Nespresso Maroc', 1190.00, 'MAD', 'https://ma.buynespresso.com/', 'https://images.unsplash.com/photo-1517668808822-9ebb02f2a0e6?w=500')
+  ('d1111111-1111-1111-1111-111111111111', 'a1111111-1111-1111-1111-111111111111', 'STRANDMON Wing chair', 'IKEA Maroc', 2495.00, 'MAD', 'https://www.ikea.ma/en/products/living-room/armchairs', 'https://images.unsplash.com/photo-1567538096630-e0c55bd6374c?w=500'),
+  ('d1111111-1111-1111-1111-111111111112', 'a1111111-1111-1111-1111-111111111111', 'Ceramic Minimalist Vase', 'Zara Home', 399.00, 'MAD', 'https://www.zarahome.com/ma/', 'https://images.unsplash.com/photo-1578749556568-bc2c40e68b61?w=500'),
+  ('d2222222-2222-2222-2222-222222222221', 'b1111111-1111-1111-1111-111111111111', 'Sony WH-1000XM5 Wireless Headphones', 'Electroplanet', 3999.00, 'MAD', 'https://www.electroplanet.ma/', 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=500'),
+  ('d2222222-2222-2222-2222-222222222222', 'b1111111-1111-1111-1111-111111111111', 'Logitech MX Master 3S', 'Jumia', 1250.00, 'MAD', 'https://www.jumia.ma/', 'https://images.unsplash.com/photo-1527864550417-7fd91fc51a46?w=500'),
+  ('d3333333-3333-3333-3333-333333333331', 'c1111111-1111-1111-1111-111111111111', 'KitchenAid Artisan Stand Mixer', 'Marjane', 5999.00, 'MAD', 'https://www.marjane.ma/', 'https://images.unsplash.com/photo-1594385208974-2e75f8d7bb48?w=500'),
+  ('d3333333-3333-3333-3333-333333333332', 'c1111111-1111-1111-1111-111111111111', 'Nespresso Essenza Mini Black', 'Nespresso Maroc', 1190.00, 'MAD', 'https://ma.buynespresso.com/', 'https://images.unsplash.com/photo-1517668808822-9ebb02f2a0e6?w=500')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO price_points (item_id, price, store, recorded_at)
 VALUES
-  ('i2222222-2222-2222-2222-222222222221', 4200.00, 'Electroplanet', now() - interval '60 days'),
-  ('i2222222-2222-2222-2222-222222222221', 4100.00, 'Electroplanet', now() - interval '30 days'),
-  ('i2222222-2222-2222-2222-222222222221', 3999.00, 'Electroplanet', now() - interval '5 days');
+  ('d2222222-2222-2222-2222-222222222221', 4200.00, 'Electroplanet', now() - interval '60 days'),
+  ('d2222222-2222-2222-2222-222222222221', 4100.00, 'Electroplanet', now() - interval '30 days'),
+  ('d2222222-2222-2222-2222-222222222221', 3999.00, 'Electroplanet', now() - interval '5 days');
 
 INSERT INTO store_offers (item_id, store, price, url)
 VALUES
-  ('i2222222-2222-2222-2222-222222222221', 'Jumia', 3850.00, 'https://www.jumia.ma/sony-wh-1000xm5'),
-  ('i2222222-2222-2222-2222-222222222221', 'Virgin Megastore', 4199.00, 'https://virginmegastore.ma/sony');
+  ('d2222222-2222-2222-2222-222222222221', 'Jumia', 3850.00, 'https://www.jumia.ma/sony-wh-1000xm5'),
+  ('d2222222-2222-2222-2222-222222222221', 'Virgin Megastore', 4199.00, 'https://virginmegastore.ma/sony');
 
 INSERT INTO friendships (requester_id, addressee_id, status)
 VALUES
