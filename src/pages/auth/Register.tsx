@@ -39,13 +39,21 @@ export default function Register() {
       );
 
       if (error) {
-        toast.error(error.message || 'Error signing up');
+        if (error.message?.toLowerCase().includes('invalid api key')) {
+          toast.error('Invalid Supabase API key. Please check your VITE_SUPABASE_ANON_KEY in Vercel or .env');
+        } else {
+          toast.error(error.message || 'Error signing up');
+        }
       } else {
         toast.success('Account created! Welcome to Wishly.');
         navigate('/onboarding');
       }
     } catch (err: any) {
-      toast.error(err.message || 'Error signing up');
+      if (err?.message?.toLowerCase().includes('invalid api key')) {
+        toast.error('Invalid Supabase API key. Please check your VITE_SUPABASE_ANON_KEY in Vercel or .env');
+      } else {
+        toast.error(err.message || 'Error signing up');
+      }
     } finally {
       setLoading(false);
     }

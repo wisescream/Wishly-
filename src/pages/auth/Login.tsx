@@ -25,13 +25,21 @@ export default function Login() {
     try {
       const { data, error } = await signInWithEmail(email, password);
       if (error) {
-        toast.error(error.message || 'Invalid credentials');
+        if (error.message?.toLowerCase().includes('invalid api key')) {
+          toast.error('Invalid Supabase API key. Please check your VITE_SUPABASE_ANON_KEY in Vercel or .env');
+        } else {
+          toast.error(error.message || 'Invalid credentials');
+        }
       } else {
         toast.success('Welcome back!');
         navigate('/home');
       }
     } catch (err: any) {
-      toast.error(err.message || 'Error signing in');
+      if (err?.message?.toLowerCase().includes('invalid api key')) {
+        toast.error('Invalid Supabase API key. Please check your VITE_SUPABASE_ANON_KEY in Vercel or .env');
+      } else {
+        toast.error(err.message || 'Error signing in');
+      }
     } finally {
       setLoading(false);
     }

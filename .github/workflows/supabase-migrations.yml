@@ -1,0 +1,56 @@
+name: Deploy Supabase Migrations on Push
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'supabase/**'
+      - 'run-migrations.sh'
+      - '.github/workflows/supabase-migrations.yml'
+  workflow_dispatch:
+
+jobs:
+  migrate:
+    name: Run Migrations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate Secrets
+        id: check-secrets
+        run: |
+          if [ -n "${{ secrets.SUPABASE_ACCESS_TOKEN }}" ] || [ -n "${{ secrets.SUPABASE_DB_PASSWORD }}" ]; then
+            echo "has_secret=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_secret=false" >> $GITHUB_OUTPUT
+            echo "::warning title=Missing Secret::Please add SUPABASE_ACCESS_TOKEN (Personal Access Token from https://supabase.com/dashboard/account/tokens) to your GitHub repository secrets: Settings -> Secrets and variables -> Actions"
+          fi
+
+      - name: Run Migrations via Supabase Management API
+        if: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_ID || 'pjpyfupkaubencuxnjyf' }}
+        run: |
+          sh run-migrations.sh
+
+      - name: Run Migrations via Supabase CLI (Fallback if DB Password provided)
+        if: ${{ secrets.SUPABASE_ACCESS_TOKEN == '' && secrets.SUPABASE_DB_PASSWORD != '' }}
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Push via Supabase CLI
+        if: ${{ secrets.SUPABASE_ACCESS_TOKEN == '' && secrets.SUPABASE_DB_PASSWORD != '' }}
+        env:
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_ID || 'pjpyfupkaubencuxnjyf' }}" --password "$SUPABASE_DB_PASSWORD"
+          supabase db push --password "$SUPABASE_DB_PASSWORD"

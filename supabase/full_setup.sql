@@ -228,6 +228,9 @@ RETURNS TRIGGER AS $$
 BEGIN
   NEW.updated_at = now();
   RETURN NEW;
+EXCEPTION WHEN undefined_column THEN
+  -- Table does not have an updated_at column; skip silently
+  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 

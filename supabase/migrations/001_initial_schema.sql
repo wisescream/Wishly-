@@ -231,6 +231,8 @@ RETURNS TRIGGER AS $$
 BEGIN
   NEW.updated_at = now();
   RETURN NEW;
+EXCEPTION WHEN undefined_column THEN
+  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 

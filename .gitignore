@@ -34,5 +34,6 @@ dist-ssr
 deploy.sh
 deploy-vercel.sh
 run-migrations.sh
+sync-keys.sh
 .vercel
 .env*
