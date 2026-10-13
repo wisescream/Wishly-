@@ -40,7 +40,7 @@ export function extractProductInfoFromUrl(url: string): {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
     let store = host;
-    let currency = "USD";
+    let currency = "";
     let brand: string | null = null;
 
     if (host.includes("jumia.ma")) {
@@ -75,6 +75,10 @@ export function extractProductInfoFromUrl(url: string): {
       currency = "EUR";
     } else if (host.endsWith(".co.uk")) {
       currency = "GBP";
+    } else if (host === "amazon.com" || host === "walmart.com" || host === "target.com") {
+      currency = "USD";
+    } else if (host === "amazon.ca" || host === "simons.ca") {
+      currency = "CAD";
     }
 
     const titleHint = productUrlSearchHint(url);
@@ -91,14 +95,14 @@ export function extractProductInfoFromUrl(url: string): {
       store,
       currency,
       brand,
-      title: titleHint || `Product from ${store}`,
+      title: titleHint,
     };
   } catch {
     return {
       store: "Online Store",
       currency: "USD",
       brand: null,
-      title: "Imported Product",
+      title: "",
     };
   }
 }
@@ -127,20 +131,21 @@ export async function importFromUrl(url: string): Promise<ImportResult> {
 
   // If fetch failed or returned empty title, use URL fallback
   if (!fetched || !fetched.title) {
-    const finalTitle = fetched?.title || urlFallback.title;
-    const finalBrand = fetched?.brand || urlFallback.brand;
+    const finalTitle = fetched?.title || "";
+    const searchTitle = finalTitle || urlFallback.title;
+    const finalBrand = fetched?.brand || null;
     const finalCurrency = fetched?.currency || urlFallback.currency;
     const finalStore = fetched?.store || urlFallback.store;
 
     // Search for candidates and offers across Moroccan & international retailers
     const [candidates, offers] = await Promise.all([
-      finalTitle.length > 2 ? searchGlobalProducts(finalTitle).catch(() => []) : Promise.resolve([]),
-      discoverOffersForProduct({
-        title: finalTitle,
-        brand: finalBrand,
-        model_number: null,
-        gtin: null,
-      }).catch(() => []),
+      searchTitle.length > 2 ? searchGlobalProducts(searchTitle).catch(() => []) : Promise.resolve([]),
+      finalTitle.length > 2 ? discoverOffersForProduct({
+          title: finalTitle,
+          brand: finalBrand,
+          model_number: null,
+          gtin: null,
+        }).catch(() => []) : Promise.resolve([]),
     ]);
 
     return {
@@ -361,6 +366,8 @@ export async function saveImportedProductToWishlist(params: {
       brand: params.brand || null,
       model_number: params.modelNumber || null,
       gtin: cleanGtin,
+      variant_label: params.variantName?.trim() || null,
+      condition: normalizeProductCondition(params.condition),
       is_verified: params.isVerified ?? false,
       enrichment_status: params.isVerified ? "offers_available" : "manual",
     })
@@ -400,6 +407,7 @@ export async function saveImportedProductToWishlist(params: {
         availability: o.availability || "in_stock",
         delivery_estimate: o.delivery_estimate || null,
         source: o.source || "scraper",
+        seller_type: o.seller_type || "unknown",
         url: o.url,
         affiliate_url: o.affiliate_url || null,
         last_verified_at: o.last_verified_at || new Date().toISOString(),
@@ -462,6 +470,7 @@ export async function refreshOffersForItem(itemId: string): Promise<FetchedOffer
       availability: o.availability || "in_stock",
       delivery_estimate: o.delivery_estimate || null,
       source: o.source || "scraper",
+      seller_type: o.seller_type || "unknown",
       url: o.url,
       affiliate_url: o.affiliate_url || null,
       last_verified_at: new Date().toISOString(),

@@ -1,0 +1,88 @@
+-- Expand the candidate directory with additional stores from the fashion
+-- coverage specification. These remain unvalidated until a public product
+-- page is inspected; presence here does not imply availability or trust.
+INSERT INTO public.retailers (
+  name, domain, canonical_domain, country_code, validation_status, seller_type,
+  categories, languages, discovery_source, is_supported
+)
+SELECT seed.name, seed.domain, seed.canonical_domain, seed.country_code,
+       'discovered', seed.seller_type, seed.categories, seed.languages,
+       'seed', false
+FROM (VALUES
+  ('Veepee France','veepee.fr','veepee.fr','FR','outlet',ARRAY['fashion','shoes'],ARRAY['fr']),
+  ('Jules France','jules.com','jules.com','FR','official',ARRAY['fashion'],ARRAY['fr']),
+  ('Blancheporte France','blancheporte.fr','blancheporte.fr','FR','official',ARRAY['fashion','shoes'],ARRAY['fr']),
+  ('Grain de Malice France','graindemalice.fr','graindemalice.fr','FR','official',ARRAY['fashion'],ARRAY['fr']),
+  ('Cortefiel Spain','cortefiel.com','cortefiel.com','ES','official',ARRAY['fashion'],ARRAY['es']),
+  ('Scalpers Spain','scalperscompany.com','scalperscompany.com','ES','official',ARRAY['fashion','shoes'],ARRAY['es','en']),
+  ('Bimba y Lola Spain','bimbaylola.com','bimbaylola.com','ES','official',ARRAY['fashion','shoes','accessories'],ARRAY['es','en']),
+  ('Salsa Jeans Portugal','salsajeans.com','salsajeans.com','PT','official',ARRAY['fashion'],ARRAY['pt','en']),
+  ('Zalando Lounge Germany','zalando-lounge.com','zalando-lounge.com','DE','outlet',ARRAY['fashion','shoes'],ARRAY['de','en']),
+  ('Nelly Nordics','nelly.com','nelly.com','SE','independent',ARRAY['fashion','shoes'],ARRAY['en','sv']),
+  ('NA-KD Nordics','na-kd.com','na-kd.com','SE','official',ARRAY['fashion','shoes'],ARRAY['en','sv']),
+  ('New Look UK','newlook.com','newlook.com','GB','official',ARRAY['fashion','shoes'],ARRAY['en']),
+  ('PrettyLittleThing UK','prettylittlething.com','prettylittlething.com','GB','official',ARRAY['fashion','shoes'],ARRAY['en']),
+  ('Very UK','very.co.uk','very.co.uk','GB','marketplace',ARRAY['fashion','shoes','general'],ARRAY['en']),
+  ('Sports Direct UK','sportsdirect.com','sportsdirect.com','GB','independent',ARRAY['sportswear','shoes'],ARRAY['en']),
+  ('Schuh UK','schuh.co.uk','schuh.co.uk','GB','independent',ARRAY['shoes'],ARRAY['en']),
+  ('Office UK','office.co.uk','office.co.uk','GB','independent',ARRAY['shoes'],ARRAY['en']),
+  ('Calzedonia Italy','calzedonia.com','calzedonia.com','IT','official',ARRAY['fashion','underwear'],ARRAY['it','en']),
+  ('Intimissimi Italy','intimissimi.com','intimissimi.com','IT','official',ARRAY['fashion','underwear'],ARRAY['it','en']),
+  ('Koton Turkey','koton.com','koton.com','TR','official',ARRAY['fashion','shoes'],ARRAY['tr','en']),
+  ('Pazarama Turkey','pazarama.com','pazarama.com','TR','marketplace',ARRAY['fashion','shoes','general'],ARRAY['tr']),
+  ('Sefamerve Turkey','sefamerve.com','sefamerve.com','TR','marketplace',ARRAY['fashion'],ARRAY['tr','en','ar']),
+  ('Amazon US','amazon.com','amazon.com','US','marketplace',ARRAY['fashion','shoes','accessories','general'],ARRAY['en']),
+  ('Walmart US','walmart.com','walmart.com','US','marketplace',ARRAY['fashion','shoes','general'],ARRAY['en']),
+  ('Target US','target.com','target.com','US','marketplace',ARRAY['fashion','shoes','general'],ARRAY['en']),
+  ('Kohls US','kohls.com','kohls.com','US','independent',ARRAY['fashion','shoes'],ARRAY['en']),
+  ('Dillards US','dillards.com','dillards.com','US','independent',ARRAY['fashion','shoes','accessories'],ARRAY['en']),
+  ('Saks Fifth Avenue US','saksfifthavenue.com','saksfifthavenue.com','US','independent',ARRAY['fashion','shoes','accessories'],ARRAY['en']),
+  ('Neiman Marcus US','neimanmarcus.com','neimanmarcus.com','US','independent',ARRAY['fashion','shoes','accessories'],ARRAY['en']),
+  ('Urban Outfitters US','urbanoutfitters.com','urbanoutfitters.com','US','official',ARRAY['fashion','shoes','accessories'],ARRAY['en']),
+  ('Anthropologie US','anthropologie.com','anthropologie.com','US','official',ARRAY['fashion','shoes','accessories'],ARRAY['en']),
+  ('Abercrombie US','abercrombie.com','abercrombie.com','US','official',ARRAY['fashion'],ARRAY['en']),
+  ('Hollister US','hollisterco.com','hollisterco.com','US','official',ARRAY['fashion'],ARRAY['en']),
+  ('American Eagle US','ae.com','ae.com','US','official',ARRAY['fashion'],ARRAY['en']),
+  ('Gap US','gap.com','gap.com','US','official',ARRAY['fashion'],ARRAY['en']),
+  ('Old Navy US','oldnavy.gap.com','oldnavy.gap.com','US','official',ARRAY['fashion'],ARRAY['en']),
+  ('Banana Republic US','bananarepublic.gap.com','bananarepublic.gap.com','US','official',ARRAY['fashion'],ARRAY['en']),
+  ('Lululemon US','shop.lululemon.com','shop.lululemon.com','US','official',ARRAY['sportswear','shoes'],ARRAY['en']),
+  ('Hudsons Bay Canada','thebay.com','thebay.com','CA','marketplace',ARRAY['fashion','shoes','accessories','general'],ARRAY['en','fr']),
+  ('Reebok Global','reebok.com','reebok.com','GLOBAL','official',ARRAY['sportswear','shoes'],ARRAY['en']),
+  ('Under Armour Global','underarmour.com','underarmour.com','GLOBAL','official',ARRAY['sportswear','shoes'],ARRAY['en']),
+  ('Vans Global','vans.com','vans.com','GLOBAL','official',ARRAY['shoes','fashion'],ARRAY['en']),
+  ('Converse Global','converse.com','converse.com','GLOBAL','official',ARRAY['shoes','fashion'],ARRAY['en']),
+  ('Finish Line US','finishline.com','finishline.com','US','independent',ARRAY['sportswear','shoes'],ARRAY['en']),
+  ('Champs Sports US','champssports.com','champssports.com','US','independent',ARRAY['sportswear','shoes'],ARRAY['en']),
+  ('BSTN Germany','bstn.com','bstn.com','DE','independent',ARRAY['sportswear','shoes'],ARRAY['de','en']),
+  ('Slam Jam Italy','slamjam.com','slamjam.com','IT','independent',ARRAY['fashion','shoes'],ARRAY['it','en']),
+  ('Stadium Goods US','stadiumgoods.com','stadiumgoods.com','US','reseller',ARRAY['sportswear','shoes','resale'],ARRAY['en']),
+  ('KLEKT Europe','klekt.com','klekt.com','GB','marketplace',ARRAY['sportswear','shoes','resale'],ARRAY['en']),
+  ('Etsy Global','etsy.com','etsy.com','GLOBAL','marketplace',ARRAY['fashion','shoes','accessories','handmade'],ARRAY['en']),
+  ('Kleinanzeigen Germany','kleinanzeigen.de','kleinanzeigen.de','DE','marketplace',ARRAY['fashion','shoes','second_hand'],ARRAY['de']),
+  ('Marktplaats Netherlands','marktplaats.nl','marktplaats.nl','NL','marketplace',ARRAY['fashion','shoes','second_hand'],ARRAY['nl']),
+  ('2dehands Belgium','2dehands.be','2dehands.be','BE','marketplace',ARRAY['fashion','shoes','second_hand'],ARRAY['nl','fr']),
+  ('Subito Italy','subito.it','subito.it','IT','marketplace',ARRAY['fashion','shoes','second_hand'],ARRAY['it']),
+  ('Tradera Sweden','tradera.com','tradera.com','SE','marketplace',ARRAY['fashion','shoes','second_hand'],ARRAY['sv','en']),
+  ('Rakuma Japan','rakuma.rakuten.co.jp','rakuma.rakuten.co.jp','JP','marketplace',ARRAY['fashion','shoes','second_hand'],ARRAY['ja']),
+  ('Carousell Global','carousell.com','carousell.com','SG','marketplace',ARRAY['fashion','shoes','second_hand'],ARRAY['en']),
+  ('OfferUp US','offerup.com','offerup.com','US','marketplace',ARRAY['fashion','shoes','second_hand'],ARRAY['en']),
+  ('Tmall China','tmall.com','tmall.com','CN','marketplace',ARRAY['fashion','shoes','accessories'],ARRAY['zh']),
+  ('JD China','jd.com','jd.com','CN','marketplace',ARRAY['fashion','shoes','accessories','general'],ARRAY['zh']),
+  ('Rakuten Global','rakuten.com','rakuten.com','JP','marketplace',ARRAY['fashion','shoes','general'],ARRAY['ja','en']),
+  ('Qoo10 Global','qoo10.com','qoo10.com','SG','marketplace',ARRAY['fashion','shoes','accessories'],ARRAY['en']),
+  ('WEGO Japan','wego.jp','wego.jp','JP','official',ARRAY['fashion','shoes'],ARRAY['ja']),
+  ('Cider Global','shopcider.com','shopcider.com','GLOBAL','official',ARRAY['fashion','shoes'],ARRAY['en']),
+  ('Stylevana Global','stylevana.com','stylevana.com','HK','marketplace',ARRAY['fashion','accessories'],ARRAY['en']),
+  ('Fashion Nova US','fashionnova.com','fashionnova.com','US','official',ARRAY['fashion','shoes'],ARRAY['en']),
+  ('Princess Polly Global','princesspolly.com','princesspolly.com','AU','official',ARRAY['fashion','shoes'],ARRAY['en']),
+  ('Privalia Europe','privalia.com','privalia.com','ES','outlet',ARRAY['fashion','shoes','accessories'],ARRAY['es','en']),
+  ('Sierra US','sierra.com','sierra.com','US','outlet',ARRAY['fashion','sportswear','shoes'],ARRAY['en']),
+  ('6pm US','6pm.com','6pm.com','US','outlet',ARRAY['fashion','shoes'],ARRAY['en'])
+) AS seed(name, domain, canonical_domain, country_code, seller_type, categories, languages)
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.retailers existing
+  WHERE lower(existing.canonical_domain) = lower(seed.canonical_domain)
+     OR lower(existing.name) = lower(seed.name)
+)
+ON CONFLICT (name) DO NOTHING;

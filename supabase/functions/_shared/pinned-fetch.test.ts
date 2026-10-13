@@ -75,6 +75,24 @@ describe("DNS-pinned product page fetch", () => {
     expect(new TextDecoder().decode(result.body)).toBe("page");
   });
 
+  it("checks redirect destinations before fetching pages disallowed by robots", async () => {
+    let connectCount = 0;
+    const transport: PinnedFetchTransport = {
+      async connect() {
+        connectCount++;
+        return socketFor("HTTP/1.1 302 Found\r\nLocation: https://cdn.example/item\r\nContent-Length: 0\r\n\r\n", []);
+      },
+      async startTls(socket) { return socket; },
+    };
+    await expect(fetchPinnedProductPage(
+      "https://shop.example/item",
+      async (_host, type) => type === "A" ? ["93.184.216.34"] : [],
+      transport,
+      { onRedirect: async (target) => target.hostname !== "cdn.example" },
+    )).rejects.toThrow(/robots\.txt/i);
+    expect(connectCount).toBe(1);
+  });
+
   it("limits the body and reports truncation instead of claiming complete extraction", async () => {
     const transport: PinnedFetchTransport = {
       async connect() { return socketFor("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n12345678", []); },

@@ -6,6 +6,24 @@ const norm = (value: unknown) => String(value ?? '').trim().toLocaleLowerCase().
 
 export type SizeMatch = 'match' | 'possible' | 'no_match' | 'unknown';
 
+export function hasPreferredSize(profile: StyleProfile | null | undefined, category: string | null | undefined): boolean {
+  if (!profile || !category || /^(fashion|clothing|apparel|accessories)$/i.test(category.trim())) return false;
+  const normalizedCategory = /shoe|footwear|sneaker|boot/i.test(category) ? 'footwear' : 'apparel';
+  const sizes = normalizedCategory === 'footwear' ? asRecord(profile.shoe_sizes) : asRecord(profile.apparel_sizes);
+  const categoryText = category.toLowerCase();
+  const categoryKey = /jean|trouser|pant|short|legging|skirt|bottom/i.test(categoryText) ? 'bottoms'
+    : /dress/i.test(categoryText) ? 'dresses'
+      : /jacket|coat|outerwear|blazer|suit/i.test(categoryText) ? 'outerwear'
+        : /sport|activewear|athletic/i.test(categoryText) ? 'sportswear'
+          : /underwear|swimwear|lingerie/i.test(categoryText) ? 'underwear' : 'tops';
+  const entry = normalizedCategory === 'footwear'
+    ? sizes
+    : asRecord(sizes[category] ?? sizes[category.toLowerCase()] ?? sizes[categoryKey]);
+  const preferred = normalizedCategory === 'footwear' ? asRecord(entry.preferred).value : entry.preferred;
+  const actual = normalizedCategory === 'footwear' ? asRecord(entry.actual).value : entry.actual;
+  return Boolean(norm(preferred) || norm(actual));
+}
+
 export function getOfferSizeMatch(profile: StyleProfile | null | undefined, category: string | null | undefined, offerSize: string | null | undefined, offerSystem?: string | null): SizeMatch {
   if (!profile || !category || !offerSize) return 'unknown';
   const normalizedCategory = /shoe|footwear|sneaker|boot/i.test(category) ? 'footwear' : 'apparel';

@@ -63,7 +63,13 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_ID || 'pjpyfupkaubencuxnjyf' }}
         run: |
-          supabase functions deploy refresh-offers --project-ref "$PROJECT_REF" --use-api
+          deploy_failed=0
+          for function_name in refresh-offers search-products refresh-tracked-products detect-fashion-items; do
+            if ! supabase functions deploy "$function_name" --project-ref "$PROJECT_REF" --debug; then
+              deploy_failed=1
+            fi
+          done
+          exit "$deploy_failed"
 
       - name: Run Migrations via Supabase CLI (Fallback if DB Password provided)
         if: ${{ steps.check-secrets.outputs.has_access_token != 'true' && steps.check-secrets.outputs.has_db_password == 'true' }}

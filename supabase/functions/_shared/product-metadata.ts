@@ -185,8 +185,12 @@ export function parseProductMetadata(html: string, pageUrl: string): ProductMeta
   const pageCurrency = firstText(offer.priceCurrency, meta["product:price:currency"], meta["og:price:currency"])?.toUpperCase() || "";
   const variants = variantNodes.flatMap((variant: any) => {
     const variantOfferValues = Array.isArray(variant.offers) ? variant.offers : [variant.offers];
-    const variantPrices = variantOfferValues.flatMap((entry: any) => entry && typeof entry === "object" ? [parsePrice(entry.price ?? entry.lowPrice)].filter((price): price is number => price != null) : []);
-    const uniquePrices = [...new Set(variantPrices.map((price) => Math.round(price * 100) / 100))];
+    const variantPrices: number[] = variantOfferValues.flatMap((entry: any) => {
+      if (!entry || typeof entry !== "object") return [];
+      const price = parsePrice(entry.price ?? entry.lowPrice);
+      return price == null ? [] : [price];
+    });
+    const uniquePrices: number[] = [...new Set<number>(variantPrices.map((price: number) => Math.round(price * 100) / 100))];
     const variantCurrencies = [...new Set(variantOfferValues.map((entry: any) => firstText(entry?.priceCurrency)?.toUpperCase()).filter(Boolean))];
     const color = firstText(variant.color);
     const size = firstText(variant.size);
@@ -223,7 +227,7 @@ export function parseProductMetadata(html: string, pageUrl: string): ProductMeta
     image_url: image,
     additional_images: imagesAll.slice(1, 7),
     description: firstText(product.description, meta["og:description"], meta.description, meta["twitter:description"]),
-    price: Number.isFinite(parsedPrice) && parsedPrice > 0 ? parsedPrice : null,
+    price: parsedPrice != null && Number.isFinite(parsedPrice) && parsedPrice > 0 ? parsedPrice : null,
     price_conflict: priceConflict,
     original_price: originalPrice,
     discount_percent: discount,

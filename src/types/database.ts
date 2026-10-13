@@ -524,6 +524,7 @@ export interface Database {
           product_match_confidence: number | null;
           match_type: string | null;
           is_verified: boolean;
+          seller_type: 'official' | 'authorized' | 'independent' | 'marketplace' | 'reseller' | 'outlet' | 'second_hand' | 'unknown';
         };
         Insert: {
           id?: string;
@@ -567,6 +568,7 @@ export interface Database {
           product_match_confidence?: number | null;
           match_type?: string | null;
           is_verified?: boolean;
+          seller_type?: 'official' | 'authorized' | 'independent' | 'marketplace' | 'reseller' | 'outlet' | 'second_hand' | 'unknown';
         };
         Update: {
           price?: number;
@@ -604,6 +606,7 @@ export interface Database {
           product_match_confidence?: number | null;
           match_type?: string | null;
           is_verified?: boolean;
+          seller_type?: 'official' | 'authorized' | 'independent' | 'marketplace' | 'reseller' | 'outlet' | 'second_hand' | 'unknown';
         };
         Relationships: [];
       };
@@ -922,6 +925,7 @@ export interface FetchedOffer {
   url: string;
   affiliate_url?: string;
   source?: string;
+  seller_type?: 'official' | 'authorized' | 'independent' | 'marketplace' | 'reseller' | 'outlet' | 'second_hand' | 'unknown';
   last_verified_at?: string;
 }
 

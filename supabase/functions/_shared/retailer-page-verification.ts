@@ -140,7 +140,7 @@ export async function verifyRetailerProductPage(
     variant_id: seed.variantId,
     store: host.slice(0, 120),
     seller: host.slice(0, 120),
-    listing_title: metadata.title.slice(0, 300),
+    listing_title: metadata.title!.slice(0, 300),
     image_url: metadata.image_url,
     size_label: metadata.variant_details.size || null,
     size_system: null,

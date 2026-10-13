@@ -15,12 +15,11 @@ import { CURRENCIES, isSupportedCurrency, type Currency } from '@/lib/currency';
 import { normalizeProductCondition, type ProductCondition } from '@/lib/productCondition';
 import { getWishlists } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
+import { FashionImageSearchPanel } from '@/components/shared/FashionImageSearchPanel';
 import {
   importByNameSearch,
   importFromBarcode,
-  importFromImage,
   importFromUrl,
   isValidGtin,
   saveImportedProductToWishlist,
@@ -80,12 +79,7 @@ export default function AddItem() {
   const [candidates, setCandidates] = useState<ProductCandidate[]>([]);
   const [busy, setBusy] = useState(false);
   const [scanActive, setScanActive] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState('');
-  const [ocrText, setOcrText] = useState('');
-  const [observedPrice, setObservedPrice] = useState<number | null>(null);
-  const [priceCurrencyAmbiguous, setPriceCurrencyAmbiguous] = useState(false);
   const [discoveredOffers, setDiscoveredOffers] = useState<FetchedOffer[]>([]);
-  const [importProgress, setImportProgress] = useState<string>('');
   const videoRef = useRef<HTMLVideoElement>(null);
   const autoSearchRef = useRef<string | null>(null);
 
@@ -98,10 +92,6 @@ export default function AddItem() {
   useEffect(() => {
     if (!wishlistId && wishlists.length) setWishlistId(wishlists[0].id);
   }, [wishlists, wishlistId]);
-
-  useEffect(() => () => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-  }, [previewUrl]);
 
   useEffect(() => {
     if (!scanActive) return;
@@ -147,7 +137,6 @@ export default function AddItem() {
   }, [scanActive]);
 
   const fillFromCandidate = async (candidate: ProductCandidate) => {
-    setPriceCurrencyAmbiguous(false);
     setPrice('');
     setPriceSource('user_entered');
     setOriginalPrice('');
@@ -204,7 +193,6 @@ export default function AddItem() {
     setBusy(true);
     setCandidates([]);
     setDiscoveredOffers([]);
-    setPriceCurrencyAmbiguous(false);
     setTitle(''); setBrand(''); setModel(''); setGtin(''); setVariant(''); setVariantDetails({}); setAvailableVariants([]);
     setCondition('unknown');
     setImageUrl(''); setAdditionalImages([]); setDescription(''); setCategory('');
@@ -276,38 +264,6 @@ export default function AddItem() {
     void handleSearch(query);
   }, [handleSearch, searchParams]);
 
-  const handleImage = async (file?: File) => {
-    if (!file) return;
-    setBusy(true);
-    setCandidates([]);
-    setOcrText('');
-    setObservedPrice(null);
-    setPriceCurrencyAmbiguous(false);
-    setTitle(''); setBrand(''); setModel(''); setGtin(''); setVariant(''); setVariantDetails({}); setAvailableVariants([]);
-    setImageUrl(''); setAdditionalImages([]); setDescription(''); setCategory('');
-    setPrice(''); setPriceSource('user_entered'); setStore(''); setProductVerified(false);
-    setOriginalPrice('');
-    setPriceCurrencyAmbiguous(false);
-    try {
-      const result = await importFromImage(file);
-      setPreviewUrl((old) => { if (old) URL.revokeObjectURL(old); return result.previewUrl; });
-      setOcrText(result.detectedText);
-      setObservedPrice(result.observedPrice);
-      setPriceCurrencyAmbiguous(result.priceCurrencyAmbiguous);
-      if (result.observedPrice) {
-        setPrice(String(result.observedPrice));
-        setPriceSource('image_ocr');
-        if (Object.prototype.hasOwnProperty.call(CURRENCIES, result.observedCurrency)) setCurrency(result.observedCurrency as Currency);
-      }
-      if (result.priceCurrencyAmbiguous) toast.info('Price text was found, but its currency symbol is ambiguous. Wishly left the price blank; enter it after confirming the currency.');
-      if (result.detectedText) setSearchInput(result.detectedText.slice(0, 200));
-      setCandidates(result.candidates);
-      if (!result.detectedText) toast.info('Image loaded. OCR is unavailable in this browser; search by name or enter details manually.');
-      else if (!result.candidates.length) toast.info('Text was read from the image. Select Search to find product candidates.');
-    } catch (error) { toast.error(error instanceof Error ? error.message : 'Could not read that image.'); }
-    finally { setBusy(false); }
-  };
-
   const handleBarcodeLookup = async (value = barcodeInput) => {
     setBusy(true);
     try {
@@ -376,17 +332,14 @@ export default function AddItem() {
               <Button type="button" onClick={() => void handleSearch()} disabled={busy || !searchInput.trim()}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Search'}</Button></div>
           </section>}
 
-          {mode === 'image' && <section className="p-4 rounded-2xl border border-border space-y-3">
-            <h2 className="text-sm font-semibold">Upload a product photo or shopping screenshot</h2>
-            <p className="text-xs text-muted-foreground">Wishly reads text in browsers that support it and sends an optimized copy to Google Lens through SerpAPI for visual matches. Matches are candidates to confirm, not verified offers.</p>
-            <Input type="file" accept="image/*" onChange={(e) => void handleImage(e.target.files?.[0])} disabled={busy} />
-            {previewUrl && <img src={previewUrl} alt="Uploaded product reference" className="max-h-52 rounded-xl object-contain" />}
-            {busy && <p className="text-xs text-muted-foreground" role="status">Reading visible text and searching visual product matches…</p>}
-            {ocrText && <p className="text-xs text-muted-foreground">Read from image: {ocrText}</p>}
-            {observedPrice && <p className="text-xs text-amber-600">Image price observation: {observedPrice} {currency}. Unverified; confirm it before relying on it.</p>}
-            {priceCurrencyAmbiguous && <p className="text-xs text-amber-600">A price-like value was detected, but the currency could not be identified. Choose the currency and enter the price manually.</p>}
-            {ocrText && <Button type="button" variant="outline" disabled={busy} onClick={() => { setMode('search'); void handleSearch(ocrText.slice(0, 200)); }}>Search using extracted text</Button>}
-          </section>}
+          {mode === 'image' && <FashionImageSearchPanel
+            onCandidates={setCandidates}
+            onSelectedItem={(selectedItem) => {
+              setCategory(selectedItem.category);
+              setBrand(selectedItem.brand);
+              setDescription(selectedItem.description);
+            }}
+          />}
 
           {mode === 'barcode' && <section className="p-4 rounded-2xl border border-border space-y-3">
             <h2 className="text-sm font-semibold">Find a product by barcode</h2>

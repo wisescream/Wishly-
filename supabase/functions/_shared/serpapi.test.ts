@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSerpApiShoppingResponse } from "./serpapi.ts";
+import { classifySerpApiFailure, describeSerpApiHttpFailure, parseSerpApiShoppingResponse } from "./serpapi.ts";
 
 describe("SerpApi Shopping response parsing", () => {
   it("returns shopping result rows", () => {
@@ -19,5 +19,38 @@ describe("SerpApi Shopping response parsing", () => {
   it("rejects invalid top-level response shapes", () => {
     expect(parseSerpApiShoppingResponse(null)).toEqual({ rows: [], error: "invalid_response" });
     expect(parseSerpApiShoppingResponse([])).toEqual({ rows: [], error: "invalid_response" });
+  });
+});
+
+
+describe("SerpApi HTTP failure messages", () => {
+  it("distinguishes invalid requests, credentials, billing, and rate limits", () => {
+    expect(describeSerpApiHttpFailure(400)).toContain("request parameters");
+    expect(describeSerpApiHttpFailure(401)).toContain("SERPAPI_KEY");
+    expect(describeSerpApiHttpFailure(402)).toContain("credits");
+    expect(describeSerpApiHttpFailure(429)).toContain("request limit");
+  });
+
+  it("does not include arbitrary provider response text", () => {
+    expect(describeSerpApiHttpFailure(500)).toBe("SerpAPI is temporarily unavailable. Wishly will retry later.");
+  });
+
+  it("extracts a missing-query diagnosis from a 400 response without retaining the body", () => {
+    const body = JSON.stringify({ error: "Missing query `q` parameter." });
+    expect(classifySerpApiFailure(400, body)).toBe("missing_query");
+    expect(describeSerpApiHttpFailure(400, body)).toContain("without a product query");
+  });
+
+  it("identifies invalid credentials but never returns the provider's key text", () => {
+    const body = JSON.stringify({ error: "Invalid API key: do-not-leak-this-value" });
+    expect(classifySerpApiFailure(400, body)).toBe("invalid_api_key");
+    expect(describeSerpApiHttpFailure(400, body)).toContain("rejected its API key");
+    expect(describeSerpApiHttpFailure(400, body)).not.toContain("do-not-leak-this-value");
+  });
+
+  it("classifies engine, quota, and access failures without exposing raw messages", () => {
+    expect(classifySerpApiFailure(400, JSON.stringify({ error: "Invalid engine parameter" }))).toBe("invalid_engine");
+    expect(classifySerpApiFailure(400, JSON.stringify({ error: "Your account has run out of searches" }))).toBe("insufficient_credits");
+    expect(classifySerpApiFailure(403, "")).toBe("account_access");
   });
 });

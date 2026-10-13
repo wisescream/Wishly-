@@ -6,25 +6,19 @@ import { getTitleCoverage } from "../_shared/title-match.ts";
 import { confirmsGenderVariant, getGenderVariant } from "../_shared/gender-variant.ts";
 import { calculateTotalPurchaseCost, parseShippingEstimate } from "../_shared/offer-cost.ts";
 import { addOfferCurrencyConversions } from "../_shared/exchange-rate.ts";
-import { parseEstimatedUnitCost, parseOpenRouterWebSearchCount, recordProviderMetric } from "../_shared/provider-metrics.ts";
-import { parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
+import { parseEstimatedUnitCost, parseOpenRouterWebSearchCount, recordProviderMetric, type ProviderErrorCode } from "../_shared/provider-metrics.ts";
+import { classifySerpApiFailure, parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
 import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
 import { buildProductSearchQueries } from "../_shared/product-search.ts";
 import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/research-persistence.ts";
 import { verifyRetailerProductPage } from "../_shared/retailer-page-verification.ts";
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
+import { resolveSearchMarket } from "../_shared/search-market.ts";
 
 const corsHeaders = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-price-check-secret" };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 const digits = (value: unknown) => String(value || "").replace(/\D/g, "");
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const currencyMarket: Record<string, { gl: string; currency: string }> = {
-  MAD: { gl: "ma", currency: "MAD" }, USD: { gl: "us", currency: "USD" }, EUR: { gl: "fr", currency: "EUR" },
-  GBP: { gl: "gb", currency: "GBP" }, CAD: { gl: "ca", currency: "CAD" }, AUD: { gl: "au", currency: "AUD" },
-  JPY: { gl: "jp", currency: "JPY" }, CNY: { gl: "cn", currency: "CNY" }, INR: { gl: "in", currency: "INR" },
-  CHF: { gl: "ch", currency: "CHF" }, SEK: { gl: "se", currency: "SEK" }, NOK: { gl: "no", currency: "NOK" },
-  DKK: { gl: "dk", currency: "DKK" }, PLN: { gl: "pl", currency: "PLN" }, AED: { gl: "ae", currency: "AED" },
-};
 const capacity = (value: string) => value.match(/\b\d+\s*(?:gb|tb|mb)\b/i)?.[0].replace(/\s/g, "").toLowerCase() || null;
 const color = (value: string) => value.match(/\b(?:black|white|silver|gold|blue|red|green|yellow|purple|pink|midnight|starlight|graphite|natural titanium|desert titanium)\b/i)?.[0].toLowerCase() || null;
 const sizeVariant = (value: unknown) => {
@@ -59,9 +53,9 @@ serve(async (req) => {
       await admin.from("items").update({
         next_offer_search_at: retryAt,
         enrichment_status: "failed",
-        enrichment_error: "No research provider is configured. Add SERPAPI_KEY for Shopping results or OPENROUTER_API_KEY for web search to Supabase Edge Function secrets.",
+        enrichment_error: "No research provider is configured. Add SERPAPI_KEY for Shopping results, or explicitly enable scheduled OpenRouter search in Supabase Edge Function secrets.",
       }).eq("status", "wanted").or(`next_offer_search_at.is.null,next_offer_search_at.lte.${new Date().toISOString()}`);
-      return json({ error: "No research provider is configured. Add SERPAPI_KEY or OPENROUTER_API_KEY to Supabase Edge Function secrets." }, 503);
+      return json({ error: "No research provider is configured. Add SERPAPI_KEY or explicitly enable scheduled OpenRouter search in Supabase Edge Function secrets." }, 503);
     }
     const startedAt = Date.now();
 
@@ -96,6 +90,7 @@ serve(async (req) => {
     let providerFailures = 0;
     let offersSaved = 0;
     let retailerPagesVerified = 0;
+    let dailyBudgetReached = false;
     let skipped = 0;
     const groups = new Map<string, typeof due>();
     for (const item of due || []) {
@@ -113,15 +108,8 @@ serve(async (req) => {
     for (const items of [...groups.values()].slice(0, 1)) {
       const seed = items[0];
       const seedPreference = preferenceByWishlist.get(seed.wishlist_id);
-      const countryMarkets: Record<string, { gl: string; hl: string; currency: string }> = {
-        MA: { ...currencyMarket.MAD, hl: "fr" }, US: { ...currencyMarket.USD, hl: "en" }, GB: { ...currencyMarket.GBP, hl: "en" }, CA: { ...currencyMarket.CAD, hl: "en" },
-        AU: { ...currencyMarket.AUD, hl: "en" }, JP: { ...currencyMarket.JPY, hl: "ja" }, FR: { ...currencyMarket.EUR, hl: "fr" }, DE: { ...currencyMarket.EUR, gl: "de", hl: "de" },
-        CH: { ...currencyMarket.CHF, hl: "de" }, IN: { ...currencyMarket.INR, hl: "en" }, CN: { ...currencyMarket.CNY, hl: "zh-CN" }, AE: { ...currencyMarket.AED, hl: "en" },
-      };
-      const currencyDefault = currencyMarket[String(seed.currency || "USD").toUpperCase()] || currencyMarket.USD;
       const targetCountry = String(seedPreference?.country || "").toUpperCase();
-      const market = countryMarkets[targetCountry] || (targetCountry ? { ...currencyDefault, gl: targetCountry.toLowerCase(), hl: "en" } : { ...currencyDefault, hl: currencyDefault.gl === "ma" ? "fr" : "en" });
-      if (seedPreference?.language && /^[a-z]{2}(?:-[A-Z]{2})?$/.test(seedPreference.language)) market.hl = seedPreference.language;
+      const market = resolveSearchMarket(targetCountry, seed.currency, seedPreference?.language);
       const checkedAt = new Date().toISOString();
       const seedGtin = digits(seed.gtin);
       const queries = buildProductSearchQueries({
@@ -140,6 +128,7 @@ serve(async (req) => {
         if (budgetError) throw budgetError;
         if (reserved !== true) {
           searchBudgetReached = true;
+          dailyBudgetReached = true;
           await recordProviderMetric(admin, { provider: "serpapi", surface: "scheduled", outcome: "budget_exhausted", marketCountry: targetCountry });
           break;
         }
@@ -148,20 +137,21 @@ serve(async (req) => {
         search.searchParams.set("q", query);
         search.searchParams.set("gl", market.gl);
         search.searchParams.set("hl", market.hl);
-        search.searchParams.set("api_key", apiKey);
+        search.searchParams.set("api_key", apiKey!);
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 9_000);
         const searchStartedAt = Date.now();
         let statusCode: number | null = null;
         let resultCount = 0;
         let outcome: "success" | "error" = "error";
+        let errorCode: ProviderErrorCode | null = null;
         let exactIdentifierFound = false;
         let response: Response;
         try { response = await fetch(search, { signal: controller.signal }); }
         catch {
           failedSearches++; providerFailures++; searched++;
           await recordProviderMetric(admin, {
-            provider: "serpapi", surface: "scheduled", outcome, durationMs: Date.now() - searchStartedAt,
+            provider: "serpapi", surface: "scheduled", outcome, errorCode: "network_error", durationMs: Date.now() - searchStartedAt,
             unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry,
           });
           continue;
@@ -171,9 +161,11 @@ serve(async (req) => {
         statusCode = response.status;
         if (!response.ok) {
           failedSearches++; providerFailures++;
+          const responseBody = await response.text();
+          errorCode = classifySerpApiFailure(response.status, responseBody);
           await recordProviderMetric(admin, {
             provider: "serpapi", surface: "scheduled", outcome, durationMs: Date.now() - searchStartedAt,
-            statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry,
+            statusCode, errorCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry,
           });
           continue;
         }
@@ -183,6 +175,7 @@ serve(async (req) => {
           if (parsed.error) {
             failedSearches++;
             providerFailures++;
+            errorCode = classifySerpApiFailure(response.status, JSON.stringify(payload));
           } else {
             const rows = parsed.rows as any[];
             resultCount = rows.length;
@@ -190,10 +183,10 @@ serve(async (req) => {
             shoppingRows.push(...rows);
             exactIdentifierFound = Boolean(seedGtin && rows.some((row: any) => [row.gtin, row.upc, row.ean].map(digits).includes(seedGtin)));
           }
-        } catch { failedSearches++; providerFailures++; }
+        } catch { failedSearches++; providerFailures++; errorCode = "invalid_response"; }
         await recordProviderMetric(admin, {
           provider: "serpapi", surface: "scheduled", outcome, durationMs: Date.now() - searchStartedAt,
-          resultCount, statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")),
+          resultCount, statusCode, errorCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")),
           marketCountry: targetCountry,
         });
         if (exactIdentifierFound) break;
@@ -226,13 +219,14 @@ serve(async (req) => {
 
       let citations: ReturnType<typeof extractRetailerCitations> = [];
       let webSearchError: string | null = null;
-      if (!hasStrongShoppingMatch && openRouterKey) {
+      if (!hasStrongShoppingMatch && openRouterKey && Deno.env.get("OPENROUTER_ALLOW_SCHEDULED_SEARCH") === "true") {
         const openRouterLimit = Deno.env.get("OPENROUTER_DAILY_REQUEST_LIMIT") || Deno.env.get("OPENROUTER_DAILY_SEARCH_LIMIT") || "8";
         const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(openRouterLimit, 10) || 8));
         const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "openrouter", p_daily_limit: dailyLimit });
         if (budgetError) throw budgetError;
         if (reserved !== true) {
           searchBudgetReached = true;
+          dailyBudgetReached = true;
           webSearchError = "Wishly reached its configured daily web-search budget. Research will retry tomorrow.";
           await recordProviderMetric(admin, { provider: "openrouter", surface: "scheduled", outcome: "budget_exhausted", marketCountry: targetCountry });
         } else {
@@ -310,6 +304,7 @@ serve(async (req) => {
         const targetGender = getGenderVariant(title);
         const matches = [...new Map(shoppingRows.flatMap((row: any) => {
           const candidateTitle = String(row.title || "");
+          const candidateColor = color(candidateTitle);
           const candidateLower = candidateTitle.toLowerCase();
           const candidateIds = [row.gtin, row.upc, row.ean].map(digits).filter(Boolean);
           const gtinMatch = Boolean(identity && candidateIds.includes(identity));
@@ -489,8 +484,8 @@ serve(async (req) => {
       }
     }
     const durationMs = Date.now() - startedAt;
-    console.info(JSON.stringify({ event: "wishly_scheduled_research", providers: [apiKey ? "serpapi_google_shopping" : null, openRouterKey ? "openrouter_web_search" : null].filter(Boolean), provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, provider_failures: providerFailures, daily_budget_reached: searchBudgetReached, offers_saved: offersSaved, due_items: due?.length || 0, skipped_without_identity: skipped, duration_ms: durationMs }));
-    return json({ success: true, due_items: due?.length || 0, provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, provider_failures: providerFailures, daily_budget_reached: searchBudgetReached, offers_saved: offersSaved, skipped_without_identity: skipped, duration_ms: durationMs });
+    console.info(JSON.stringify({ event: "wishly_scheduled_research", providers: [apiKey ? "serpapi_google_shopping" : null, openRouterKey ? "openrouter_web_search" : null].filter(Boolean), provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, due_items: due?.length || 0, skipped_without_identity: skipped, duration_ms: durationMs }));
+    return json({ success: true, due_items: due?.length || 0, provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, skipped_without_identity: skipped, duration_ms: durationMs });
   } catch {
     return json({ error: "Scheduled offer refresh failed; existing offer records were retained." }, 500);
   }

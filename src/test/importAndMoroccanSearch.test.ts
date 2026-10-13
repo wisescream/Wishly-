@@ -62,8 +62,8 @@ describe("Product Import & URL Parsing", () => {
   });
 
   it("validates GTIN/EAN barcodes accurately", () => {
-    expect(isValidGtin("0194253784561")).toBe(true);
-    expect(isValidGtin("12345678")).toBe(true);
+    expect(isValidGtin("0194253784562")).toBe(true);
+    expect(isValidGtin("12345670")).toBe(true);
     expect(isValidGtin("not-a-barcode")).toBe(false);
     expect(isValidGtin("123")).toBe(false);
   });

@@ -4,9 +4,10 @@ import type { StoreOffer } from '@/types/database';
 import { type Currency, formatPrice } from '@/lib/currency';
 import { Button } from '@/components/ui/button';
 import type { StyleProfile } from '@/types/database';
-import { getOfferSizeMatch, getSizeRecommendationLabel } from '@/lib/fashionSizes';
-import { compareOfferTotalPrice } from '@/lib/offerRanking';
+import { getOfferSizeMatch, getSizeRecommendationLabel, hasPreferredSize } from '@/lib/fashionSizes';
+import { compareOfferFreshnessAndAvailability, compareOfferTotalPrice } from '@/lib/offerRanking';
 import { compareProductConditions, formatProductCondition } from '@/lib/productCondition';
+import { formatSellerType, matchesSellerType } from '@/lib/sellerType';
 
 interface StoreComparisonTableProps {
   offers: StoreOffer[];
@@ -30,6 +31,7 @@ export function StoreComparisonTable({
   className,
 }: StoreComparisonTableProps) {
   const [storeFilter, setStoreFilter] = React.useState('all');
+  const [sellerTypeFilter, setSellerTypeFilter] = React.useState('all');
   const [conditionFilter, setConditionFilter] = React.useState('all');
   const [availabilityFilter, setAvailabilityFilter] = React.useState('all');
   const [shippingFilter, setShippingFilter] = React.useState('all');
@@ -52,7 +54,8 @@ export function StoreComparisonTable({
   };
   const isHighConfidenceMatch = (offer: StoreOffer) => Number(offer.product_match_confidence || 0) >= 0.9
     && !String(offer.match_type || '').includes('unconfirmed')
-    && compareProductConditions(itemCondition, offer.condition) === 'exact';
+    && compareProductConditions(itemCondition, offer.condition) === 'exact'
+    && (!hasPreferredSize(styleProfile, category) || getOfferSizeMatch(styleProfile, category, offer.size_label, offer.size_system) === 'match');
   const comparable = (offer: StoreOffer) => offer.currency === currency
     || (offer.currency_converted_to === currency && offer.converted_price != null);
   const hasKnownTotal = (offer: StoreOffer) => offer.total_price != null && !offer.total_is_estimated;
@@ -84,6 +87,8 @@ export function StoreComparisonTable({
     }
     if (sortBy === 'retailer') return a.store.localeCompare(b.store);
     if (sortBy === 'recent') return Date.parse(b.last_verified_at || '') - Date.parse(a.last_verified_at || '');
+    const evidenceRank = compareOfferFreshnessAndAvailability(a, b);
+    if (evidenceRank) return evidenceRank;
     if (a.is_verified !== b.is_verified) return a.is_verified ? -1 : 1;
     const confidenceA = isHighConfidenceMatch(a);
     const confidenceB = isHighConfidenceMatch(b);
@@ -102,6 +107,7 @@ export function StoreComparisonTable({
   };
   const visibleOffers = offers.filter((offer) =>
     (storeFilter === 'all' || offer.store === storeFilter)
+    && matchesSellerType(offer.seller_type, sellerTypeFilter)
     && (conditionFilter === 'all' || (offer.condition || 'unknown') === conditionFilter)
     && (availabilityFilter === 'all' || (offer.availability || 'unknown') === availabilityFilter)
     && (shippingFilter === 'all' || (shippingFilter === 'known' ? offer.shipping_known : !offer.shipping_known))
@@ -138,6 +144,7 @@ export function StoreComparisonTable({
       <div className="flex flex-wrap gap-2 p-3 border-b border-border/40" aria-label="Offer comparison filters">
         <select aria-label="Sort offers" value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[11px]"><option value="best">Best match and value</option><option value="item-price">Item price</option><option value="total-price">Known total first</option><option value="shipping">Shipping</option><option value="retailer">Retailer</option><option value="recent">Recently verified</option></select>
         <select aria-label="Filter by retailer" value={storeFilter} onChange={(event) => setStoreFilter(event.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[11px]"><option value="all">All retailers</option>{[...new Set(offers.map((offer) => offer.store))].sort().map((store) => <option key={store} value={store}>{store}</option>)}</select>
+        <select aria-label="Filter by seller type" value={sellerTypeFilter} onChange={(event) => setSellerTypeFilter(event.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[11px]"><option value="all">All seller types</option>{[...new Set(offers.map((offer) => offer.seller_type || 'unknown'))].sort().map((type) => <option key={type} value={type}>{formatSellerType(type)}</option>)}</select>
         <select aria-label="Filter by condition" value={conditionFilter} onChange={(event) => setConditionFilter(event.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[11px]"><option value="all">All conditions</option>{[...new Set(offers.map((offer) => offer.condition || 'unknown'))].sort().map((condition) => <option key={condition} value={condition}>{condition}</option>)}</select>
         <select aria-label="Filter by availability" value={availabilityFilter} onChange={(event) => setAvailabilityFilter(event.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[11px]"><option value="all">All stock states</option>{[...new Set(offers.map((offer) => offer.availability || 'unknown'))].sort().map((availability) => <option key={availability} value={availability}>{availability.replace(/_/g, ' ')}</option>)}</select>
         <select aria-label="Filter by shipping evidence" value={shippingFilter} onChange={(event) => setShippingFilter(event.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[11px]"><option value="all">Any shipping evidence</option><option value="known">Shipping known</option><option value="unknown">Shipping unknown</option></select>
@@ -178,6 +185,7 @@ export function StoreComparisonTable({
                   <span className="text-[10px] text-muted-foreground">
                     {formatProductCondition(offer.condition)} · {availability}{isStale ? ' · stale result' : offer.is_verified ? ` · retailer page checked ${new Date(offer.last_verified_at).toLocaleDateString()}` : ` · provider checked ${new Date(offer.last_verified_at).toLocaleDateString()}`}
                   </span>
+                  <span className="block text-[10px] text-muted-foreground">Seller type: {formatSellerType(offer.seller_type)}</span>
                   {offer.listing_title && <span className="block max-w-52 text-[10px] text-muted-foreground line-clamp-2">{offer.listing_title}</span>}
                   <span className={`block text-[10px] ${isHighConfidenceMatch(offer) ? 'text-emerald-600' : 'text-amber-600'}`}>{isHighConfidenceMatch(offer) ? 'High-confidence product match' : 'Possible match · confirm model and variant'}{offer.source === 'openrouter_web_search' ? ' · web snippet price; verify at retailer' : ''}</span>
                   {!offer.is_verified && <span className="block text-[10px] text-amber-600">Provider price; retailer page not confirmed</span>}

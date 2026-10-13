@@ -25,6 +25,7 @@ import { getItem, updateItem, deleteItem, reserveItem, unreserveItem, getStylePr
 import { useAuth } from '@/contexts/AuthContext';
 import { type Currency, formatPrice } from '@/lib/currency';
 import { formatProductCondition } from '@/lib/productCondition';
+import { readExpandedRetailerSearchPreference, writeExpandedRetailerSearchPreference } from '@/lib/searchPreferences';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
 
@@ -41,6 +42,7 @@ export default function ItemDetail() {
   const [alertOnNewRetailer, setAlertOnNewRetailer] = useState(false);
   const [alertOnBackInStock, setAlertOnBackInStock] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [allowExpandedSearch, setAllowExpandedSearch] = useState(false);
 
   const { data: item, isLoading, isError: itemLoadFailed, refetch: retryLoadItem } = useQuery({
     queryKey: ['item-detail', id],
@@ -65,6 +67,10 @@ export default function ItemDetail() {
       setSelectedImage(item.image_url || item.additional_images?.[0] || null);
     }
   }, [item]);
+
+  React.useEffect(() => {
+    setAllowExpandedSearch(readExpandedRetailerSearchPreference(profile?.id || ''));
+  }, [profile?.id]);
 
   const isOwner = profile?.id === item?.wishlist?.owner_id;
   const isReserved = item?.status === 'reserved';
@@ -95,7 +101,7 @@ export default function ItemDetail() {
   const refreshOffersMutation = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke('refresh-offers', {
-        body: { item_id: id, force_refresh: true },
+        body: { item_id: id, force_refresh: true, allow_expanded_search: allowExpandedSearch },
       });
       if (error) throw await getFunctionError(error, 'Offer search could not reach its providers.');
       if (data?.error && !data?.status) throw new Error(data.error);
@@ -429,6 +435,14 @@ export default function ItemDetail() {
                 {refreshOffersMutation.isPending ? 'Searching…' : 'Refresh offers'}
               </Button>}
             </div>
+            {isOwner && <label className="flex items-start gap-2 rounded-lg border border-border/60 p-2 text-[10px] text-muted-foreground">
+              <input type="checkbox" checked={allowExpandedSearch} onChange={(event) => {
+                const enabled = event.target.checked;
+                setAllowExpandedSearch(enabled);
+                writeExpandedRetailerSearchPreference(profile?.id || '', enabled);
+              }} className="mt-0.5 accent-primary" />
+              <span>Also search the wider web with configured discovery providers. This may use provider quota. Your choice is remembered on this device for your account.</span>
+            </label>}
             {item.enrichment_status === 'partial' && <p className="text-[10px] text-amber-700">The search provider returned partial results. Previously discovered offers remain available and may be stale.</p>}
             {item.enrichment_status === 'no_matches' && <p className="text-[10px] text-muted-foreground">No reliable exact matches were found in the configured search source yet.</p>}
             <StoreComparisonTable

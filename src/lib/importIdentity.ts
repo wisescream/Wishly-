@@ -30,7 +30,13 @@ export function productUrlSearchHint(value: string): string {
     const url = new URL(value);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return "";
     const segments = url.pathname.split("/").filter(Boolean);
-    const encodedSegment = segments[segments.length - 1] || "";
+    const lastIndex = segments.length - 1;
+    // Marketplace product URLs often put a human-readable title before an
+    // opaque identifier (for example Amazon's /Title/dp/ASIN form).
+    const titleIndex = lastIndex > 0 && ["dp", "gp", "itm"].includes(segments[lastIndex - 1].toLowerCase())
+      ? lastIndex - 2
+      : lastIndex;
+    const encodedSegment = titleIndex >= 0 ? segments[titleIndex] : "";
     let segment = encodedSegment;
     try { segment = decodeURIComponent(encodedSegment); } catch { /* Keep malformed path text encoded. */ }
     return segment

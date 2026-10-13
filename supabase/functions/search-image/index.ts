@@ -22,9 +22,9 @@ serve(async (req) => {
     const client = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authorization } } });
     const { data: auth } = await client.auth.getUser();
     if (!auth.user) return json({ error: "Authentication required." }, 401);
-    const { data: preferences, error: preferencesError } = await client.from("profiles").select("country,language").eq("id", auth.user.id).maybeSingle();
+    const { data: preferences, error: preferencesError } = await client.from("profiles").select("country,currency,language").eq("id", auth.user.id).maybeSingle();
     if (preferencesError) return json({ error: "Your search preferences could not be loaded." }, 503);
-    const market = resolveSearchMarket(preferences?.country, null, preferences?.language);
+    const market = resolveSearchMarket(preferences?.country, preferences?.currency, preferences?.language);
     const { data: userRequestReserved, error: userRequestError } = await client.rpc("reserve_interactive_provider_request", { p_surface: "image_search" });
     if (userRequestError) return json({ error: "Image-search limits are temporarily unavailable. Try again shortly." }, 503);
     if (userRequestReserved !== true) return json({ error: "Image-search limit reached. Try again in a minute." }, 429);

@@ -15,13 +15,13 @@ interface PersistenceOffer {
 }
 
 interface RpcAdmin {
-  rpc(name: string, args: Record<string, unknown>): Promise<{ data?: unknown; error?: { code?: string | null } | null }>;
+  rpc(name: string, args: Record<string, unknown>): PromiseLike<{ data?: unknown; error?: { code?: string | null } | null }>;
 }
 
 interface RetryAdmin {
   from(table: string): {
     update(values: Record<string, unknown>): {
-      eq(column: string, value: string): Promise<{ error?: { code?: string | null } | null }>;
+      eq(column: string, value: string): PromiseLike<{ error?: { code?: string | null } | null }>;
     };
   };
 }

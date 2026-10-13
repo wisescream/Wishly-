@@ -1,6 +1,19 @@
-export type ProviderName = "serpapi" | "openrouter";
+export type ProviderName = "serpapi" | "openrouter" | "tavily" | "searxng";
 export type ProviderSurface = "interactive" | "scheduled";
 export type ProviderOutcome = "success" | "error" | "budget_exhausted";
+export type ProviderErrorCode =
+  | "missing_query"
+  | "invalid_request"
+  | "invalid_api_key"
+  | "account_access"
+  | "insufficient_credits"
+  | "rate_limited"
+  | "invalid_engine"
+  | "provider_error"
+  | "invalid_response"
+  | "network_error"
+  | "provider_unavailable"
+  | "unknown";
 
 export function parseEstimatedUnitCost(value: string | undefined): number | null {
   if (!value?.trim()) return null;
@@ -26,11 +39,12 @@ interface ProviderMetric {
   statusCode?: number | null;
   unitCostUsd?: number | null;
   marketCountry?: string | null;
+  errorCode?: ProviderErrorCode | null;
 }
 
 export async function recordProviderMetric(client: any, metric: ProviderMetric): Promise<void> {
   const requestCount = metric.outcome === "budget_exhausted" ? 0 : 1;
-  const searchCount = requestCount === 0 ? 0 : metric.searchCount ?? (metric.provider === "serpapi" ? 1 : null);
+  const searchCount = requestCount === 0 ? 0 : metric.searchCount ?? (metric.provider === "openrouter" ? null : 1);
   const estimatedCost = requestCount === 0 || searchCount == null || metric.unitCostUsd == null
     ? null
     : Math.round(searchCount * metric.unitCostUsd * 1_000_000) / 1_000_000;
@@ -45,6 +59,7 @@ export async function recordProviderMetric(client: any, metric: ProviderMetric):
     status_code: metric.statusCode || null,
     estimated_cost_usd: estimatedCost,
     market_country: metric.marketCountry && /^[A-Z]{2}$/.test(metric.marketCountry) ? metric.marketCountry : null,
+    error_code: metric.errorCode || null,
   };
 
   try {

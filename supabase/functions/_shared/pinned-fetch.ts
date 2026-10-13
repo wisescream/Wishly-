@@ -123,14 +123,14 @@ async function requestPinnedAddress(
   maxBodyBytes: number,
   timeoutMs: number,
 ): Promise<Omit<PinnedHttpResponse, "finalUrl">> {
-  let socket: PinnedSocket | null = null;
+  const socketState: { current: PinnedSocket | null } = { current: null };
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let rejectTimeout: ((error: Error) => void) | undefined;
   const timeout = new Promise<never>((_, reject) => { rejectTimeout = reject; });
   timer = setTimeout(() => {
     expired = true;
-    socket?.close();
+    socketState.current?.close();
     rejectTimeout?.(new Error("Retailer request timed out."));
   }, timeoutMs);
 
@@ -138,10 +138,10 @@ async function requestPinnedAddress(
     const port = url.protocol === "https:" ? 443 : 80;
     let connection = await transport.connect(address, port);
     if (expired) { connection.close(); throw new Error("Retailer request timed out."); }
-    socket = connection;
+    socketState.current = connection;
     if (url.protocol === "https:") {
       connection = await transport.startTls(connection, url.hostname);
-      socket = connection;
+      socketState.current = connection;
     }
     const path = `${url.pathname || "/"}${url.search}`;
     const request = new TextEncoder().encode(
@@ -189,7 +189,7 @@ async function requestPinnedAddress(
     return await Promise.race([operation(), timeout]);
   } finally {
     if (timer) clearTimeout(timer);
-    socket?.close();
+    socketState.current?.close();
   }
 }
 
@@ -197,7 +197,7 @@ export async function fetchPinnedProductPage(
   input: string,
   resolveDns: DnsResolver,
   transport: PinnedFetchTransport,
-  options: { maxBodyBytes?: number; timeoutMs?: number; maxRedirects?: number } = {},
+  options: { maxBodyBytes?: number; timeoutMs?: number; maxRedirects?: number; onRedirect?: (target: URL) => Promise<boolean> } = {},
 ): Promise<PinnedHttpResponse> {
   const maxBodyBytes = options.maxBodyBytes ?? 2.5 * 1024 * 1024;
   const deadline = Date.now() + (options.timeoutMs ?? 8_000);
@@ -240,8 +240,14 @@ export async function fetchPinnedProductPage(
       return { ...response, finalUrl: validation.url };
     }
     if (!location || redirectCount === maxRedirects) throw new UnsafeProductUrlError("Too many or invalid redirects.");
-    try { current = new URL(location, validation.url).href; }
-    catch { throw new UnsafeProductUrlError("Redirect destination is not a valid URL."); }
+    try {
+      const target = new URL(location, validation.url);
+      if (options.onRedirect && !await options.onRedirect(target)) throw new UnsafeProductUrlError("Redirect destination is disallowed by robots.txt.");
+      current = target.href;
+    } catch (error) {
+      if (error instanceof UnsafeProductUrlError) throw error;
+      throw new UnsafeProductUrlError("Redirect destination is not a valid URL.");
+    }
   }
   throw new UnsafeProductUrlError("Too many redirects.");
 }

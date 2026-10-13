@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StoreOffer, StyleProfile } from '@/types/database';
-import { getOfferSizeMatch, getSizeRecommendationLabel, rankSizeAwareOffers } from './fashionSizes';
+import { getOfferSizeMatch, getSizeRecommendationLabel, hasPreferredSize, rankSizeAwareOffers } from './fashionSizes';
 
 const profile = {
   sizing_context: 'womens',
@@ -42,6 +42,13 @@ describe('fashion size matching', () => {
   it('uses category-specific bottoms instead of reusing top sizes', () => {
     expect(getOfferSizeMatch(profile, 'Jeans', '32')).toBe('match');
     expect(getOfferSizeMatch(profile, 'Jeans', 'L')).toBe('no_match');
+  });
+
+  it('requires verified preferred size before a listing counts as a complete match', () => {
+    expect(hasPreferredSize(profile, 'sneakers')).toBe(true);
+    expect(hasPreferredSize(profile, 'jeans')).toBe(true);
+    expect(hasPreferredSize(profile, 'fashion')).toBe(false);
+    expect(hasPreferredSize(null, 'jeans')).toBe(false);
   });
 
   it('prioritizes size compatible offers before cheaper incompatible variants', () => {

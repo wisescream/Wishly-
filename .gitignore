@@ -34,3 +34,5 @@ dist-ssr
 sync-keys.sh
 .vercel
 .env*
+!.env.example
+supabase/.temp/
