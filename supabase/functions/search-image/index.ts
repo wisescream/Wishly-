@@ -39,10 +39,10 @@ serve(async (req) => {
     const bytes = new Uint8Array(await upload.arrayBuffer());
     if (!validImage(bytes)) return json({ error: "Image must be a valid JPEG, PNG, or WebP file." }, 400);
 
-    const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SERPAPI_DAILY_SEARCH_LIMIT") || "31", 10) || 31));
-    const { data: providerRequestReserved, error: providerBudgetError } = await admin.rpc("reserve_provider_search", { p_provider: "serpapi", p_daily_limit: dailyLimit });
-    if (providerBudgetError) return json({ error: "Shopping search budget could not be checked. Try again shortly." }, 503);
-    if (providerRequestReserved !== true) return json({ configured: true, candidates: [], error: "Wishly reached its configured daily Shopping search budget. Try again tomorrow." }, 429);
+    const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SERPAPI_IMAGE_SEARCH_DAILY_LIMIT") || "5", 10) || 5));
+    const { data: providerRequestReserved, error: providerBudgetError } = await admin.rpc("reserve_provider_search", { p_provider: "serpapi_image", p_daily_limit: dailyLimit });
+    if (providerBudgetError) return json({ error: "Image-search budget could not be checked. Try again shortly." }, 503);
+    if (providerRequestReserved !== true) return json({ configured: true, candidates: [], error: "Wishly reached its configured daily image-search budget. Try again tomorrow." }, 429);
 
     const imageForm = new FormData();
     imageForm.append("image", new Blob([bytes], { type: upload.type }), "wishly-image.jpg");

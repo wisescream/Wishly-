@@ -12,9 +12,11 @@ export function readExpandedRetailerSearchPreference(
   userId: string,
   storage: PreferenceStorage | undefined = browserStorage(),
 ): boolean {
-  if (!userId || !storage) return false;
-  try { return storage.getItem(`${EXPANDED_SEARCH_KEY_PREFIX}${userId}`) === 'true'; }
-  catch { return false; }
+  if (!userId || !storage) return true;
+  try {
+    const saved = storage.getItem(`${EXPANDED_SEARCH_KEY_PREFIX}${userId}`);
+    return saved === null ? true : saved === 'true';
+  } catch { return true; }
 }
 
 export function writeExpandedRetailerSearchPreference(

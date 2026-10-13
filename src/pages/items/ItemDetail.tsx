@@ -42,7 +42,7 @@ export default function ItemDetail() {
   const [alertOnNewRetailer, setAlertOnNewRetailer] = useState(false);
   const [alertOnBackInStock, setAlertOnBackInStock] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [allowExpandedSearch, setAllowExpandedSearch] = useState(false);
+  const [allowExpandedSearch, setAllowExpandedSearch] = useState(true);
 
   const { data: item, isLoading, isError: itemLoadFailed, refetch: retryLoadItem } = useQuery({
     queryKey: ['item-detail', id],
