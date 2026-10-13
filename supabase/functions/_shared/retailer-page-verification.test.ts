@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseProductMetadata } from "./product-metadata.ts";
-import { retailerPageMatchesProduct, verifyRetailerProductPage } from "./retailer-page-verification.ts";
+import { inspectAndVerifyRetailerProductPage, retailerPageMatchesProduct, verifyRetailerProductPage } from "./retailer-page-verification.ts";
 import type { PinnedFetchTransport, PinnedSocket } from "./pinned-fetch.ts";
 
 const seed = {
@@ -89,6 +89,26 @@ describe("retailer page offer verification", () => {
       transportFor(productPage(), "User-agent: *\nDisallow: /product"),
     );
     expect(offer).toBeNull();
+  });
+
+  it("returns a safe failure reason when a fetched page cannot confirm this product", async () => {
+    const attempt = await inspectAndVerifyRetailerProductPage(
+      "http://93.184.216.37/product",
+      seed,
+      async () => [],
+      transportFor(productPage({ gtin13: "4006381333931" })),
+    );
+    expect(attempt).toMatchObject({ offer: null, status: 200, errorCode: "product_identity_not_confirmed", evidence: { hasPrice: true, currency: "EUR" } });
+  });
+
+  it("classifies robots denial without exposing page content", async () => {
+    const attempt = await inspectAndVerifyRetailerProductPage(
+      "http://93.184.216.38/product",
+      seed,
+      async () => [],
+      transportFor(productPage(), "User-agent: *\nDisallow: /product"),
+    );
+    expect(attempt).toMatchObject({ offer: null, status: null, errorCode: "robots_restricted", evidence: { hasPrice: false, hasImage: false } });
   });
 
   it("does not assign perfect identity confidence when a retailer page has no GTIN", async () => {
