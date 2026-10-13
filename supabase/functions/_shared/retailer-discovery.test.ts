@@ -11,6 +11,8 @@ describe("retailer discovery utilities", () => {
 
   it("classifies only known marketplace and resale domains, and derives country hints", () => {
     expect(classifySeller("vinted.fr")).toBe("marketplace");
+    expect(classifySeller("amazon.com")).toBe("marketplace");
+    expect(classifySeller("www.jumia.ma")).toBe("marketplace");
     expect(classifySeller("theoutnet.com")).toBe("outlet");
     expect(classifySeller("small-boutique.ma")).toBe("unknown");
     expect(inferRetailerCountry("shop.example.co.uk")).toBe("GB");

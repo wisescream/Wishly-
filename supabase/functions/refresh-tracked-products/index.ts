@@ -13,6 +13,7 @@ import { buildProductSearchQueries } from "../_shared/product-search.ts";
 import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/research-persistence.ts";
 import { inspectAndVerifyRetailerProductPage } from "../_shared/retailer-page-verification.ts";
 import { classifySeller, getRetailerDomain, inferRetailerCountry } from "../_shared/retailer-discovery.ts";
+import { inspectRetailerCatalog } from "../_shared/retailer-catalog-inspection.ts";
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
 
@@ -34,6 +35,11 @@ const sizeVariant = (value: unknown) => {
 const providerCondition = (providerValue: unknown, title: string) => {
   const condition = normalizeProductCondition(providerValue);
   return condition === "unknown" ? normalizeProductCondition(title) : condition;
+};
+const retailerDns = (hostname: string, recordType: "A" | "AAAA") => Deno.resolveDns(hostname, recordType);
+const retailerTransport = {
+  connect: (address: string, port: number) => Deno.connect({ hostname: address, port }),
+  startTls: (socket: any, hostname: string) => Deno.startTls(socket, { hostname }),
 };
 
 serve(async (req) => {
@@ -59,6 +65,8 @@ serve(async (req) => {
       return json({ error: "No research provider is configured. Add SERPAPI_KEY or explicitly enable scheduled OpenRouter search in Supabase Edge Function secrets." }, 503);
     }
     const startedAt = Date.now();
+    let retailerSeedsInspected = 0;
+    let retailerSeedsValidated = 0;
 
     const now = new Date();
     const { data: due, error } = await admin.from("items")
@@ -588,9 +596,87 @@ serve(async (req) => {
         if (item.product_id) await admin.from("products").update({ offers_last_checked_at: checkedAt, offer_search_status: status }).eq("id", item.product_id);
       }
     }
+    const retailerNow = new Date().toISOString();
+    const { data: retailerQueue, error: retailerQueueError } = await admin.from("retailers")
+      .select("id,name,canonical_domain,country_code,discovery_source,validation_status,reliability_score,trust_evidence,extraction_capabilities")
+      .in("validation_status", ["discovered", "pending_inspection", "temporarily_unavailable"])
+      .or(`retry_after.is.null,retry_after.lte.${retailerNow}`)
+      .order("last_inspected_at", { ascending: true, nullsFirst: true })
+      .order("first_discovered_at", { ascending: true })
+      .limit(1);
+    if (retailerQueueError) {
+      console.error(JSON.stringify({ event: "retailer_catalog_queue_failed" }));
+    } else {
+      const retailer = retailerQueue?.[0];
+      const domain = retailer?.canonical_domain || retailer?.domain;
+      if (retailer && typeof domain === "string") {
+        const inspectionStartedAt = new Date().toISOString();
+        const retryLease = new Date(Date.now() + 20 * 60 * 1000).toISOString();
+        await admin.from("retailers").update({ validation_status: "pending_inspection", retry_after: retryLease })
+          .eq("id", retailer.id);
+        const inspection = await inspectRetailerCatalog(domain, retailerDns, retailerTransport);
+        const inspectedAt = new Date().toISOString();
+        const retryHours = inspection.status === "validated" ? 30 * 24
+          : inspection.status === "restricted" ? 30 * 24
+            : inspection.status === "temporarily_unavailable" ? 24
+              : inspection.status === "rejected" ? 90 * 24 : 7 * 24;
+        const reliability = Math.max(0, Math.min(1, Number(retailer.reliability_score ?? 0.5)
+          + (inspection.status === "validated" ? 0.02 : inspection.status === "restricted" || inspection.status === "temporarily_unavailable" ? -0.02 : 0)));
+        const extractionCapabilities = {
+          ...(retailer.extraction_capabilities || {}),
+          product_page: Boolean(retailer.extraction_capabilities?.product_page || inspection.status === "validated"),
+          title: Boolean(retailer.extraction_capabilities?.title || inspection.evidence.title),
+          price: Boolean(retailer.extraction_capabilities?.price || inspection.evidence.hasPrice),
+          currency: Boolean(retailer.extraction_capabilities?.currency || inspection.evidence.currency),
+          image: Boolean(retailer.extraction_capabilities?.image || inspection.evidence.hasImage),
+        };
+        const evidenceText = inspection.status === "validated"
+          ? `A public product page exposed a title, price, currency, and image on ${domain}. This does not establish seller authorization or product authenticity.`
+          : retailer.trust_evidence || null;
+        const detectedSellerType = retailer.seller_type === "unknown" ? classifySeller(domain) : retailer.seller_type;
+        const update = await admin.from("retailers").update({
+          validation_status: inspection.status,
+          ...(detectedSellerType !== "unknown" ? { seller_type: detectedSellerType } : {}),
+          last_inspected_at: inspectedAt,
+          ...(inspection.status === "validated" ? { last_successful_at: inspectedAt } : {}),
+          last_error: inspection.errorCode,
+          retry_after: new Date(Date.now() + retryHours * 60 * 60 * 1000).toISOString(),
+          reliability_score: reliability,
+          extraction_capabilities: extractionCapabilities,
+          trust_evidence: evidenceText,
+        }).eq("id", retailer.id);
+        if (update.error) console.error(JSON.stringify({ event: "retailer_catalog_status_write_failed", retailer_id: retailer.id }));
+        else {
+          retailerSeedsInspected++;
+          if (inspection.status === "validated") retailerSeedsValidated++;
+        }
+        const allowedSource = new Set(["tavily", "serpapi", "openrouter", "seed", "url_import"]);
+        const sourceProvider = allowedSource.has(retailer.discovery_source) ? retailer.discovery_source : "seed";
+        const outcome = inspection.status === "validated" ? "inspection_succeeded"
+          : inspection.status === "restricted" ? "restricted"
+            : inspection.status === "rejected" ? "rejected" : "inspection_failed";
+        const eventWrite = await admin.from("retailer_discovery_events").insert({
+          retailer_id: retailer.id,
+          canonical_domain: domain,
+          source_provider: sourceProvider,
+          source_url: inspection.pageUrl || `https://${domain}`,
+          outcome,
+          error_code: inspection.errorCode,
+          evidence: {
+            inspection_type: "bounded_sitemap_product_probe",
+            retailer_status: inspection.status,
+            http_status: inspection.httpStatus,
+            inspected_at: inspectionStartedAt,
+            ...inspection.evidence,
+          },
+        });
+        if (eventWrite.error) console.error(JSON.stringify({ event: "retailer_catalog_event_write_failed", retailer_id: retailer.id }));
+      }
+    }
+
     const durationMs = Date.now() - startedAt;
-    console.info(JSON.stringify({ event: "wishly_scheduled_research", providers: [apiKey ? "serpapi_google_shopping" : null, openRouterKey ? "openrouter_web_search" : null].filter(Boolean), provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, due_items: due?.length || 0, skipped_without_identity: skipped, duration_ms: durationMs }));
-    return json({ success: true, due_items: due?.length || 0, provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, skipped_without_identity: skipped, duration_ms: durationMs });
+    console.info(JSON.stringify({ event: "wishly_scheduled_research", providers: [apiKey ? "serpapi_google_shopping" : null, openRouterKey ? "openrouter_web_search" : null].filter(Boolean), provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, due_items: due?.length || 0, skipped_without_identity: skipped, duration_ms: durationMs }));
+    return json({ success: true, due_items: due?.length || 0, provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, skipped_without_identity: skipped, duration_ms: durationMs });
   } catch {
     return json({ error: "Scheduled offer refresh failed; existing offer records were retained." }, 500);
   }

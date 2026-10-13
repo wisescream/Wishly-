@@ -77,8 +77,8 @@ export function inferRetailerCountry(domain: string): string {
 }
 
 export function classifySeller(domain: string): RetailerSellerType {
-  const host = domain.toLowerCase();
-  if (/vinted|avito|ebay|depop|grailed|poshmark|mercari|vestiaire|stockx|goat|wallapop|kleinanzeigen|marketplace|etsy/.test(host)) return "marketplace";
+  const host = domain.toLowerCase().replace(/^www\./, "");
+  if (/(?:^|\.)(?:vinted|avito|ebay|depop|grailed|poshmark|mercari|vestiaire|stockx|goat|wallapop|kleinanzeigen|marketplace|etsy|amazon|walmart|jumia|marjanemall|cdiscount|rakuten|trendyol|hepsiburada|aliexpress|temu|taobao|tmall|jd|qoo10|pazarama)\.[a-z]{2,}(?:\.[a-z]{2,})?$/i.test(host)) return "marketplace";
   if (/outlet|veepee|privalia|showroomprive|bestsecret|yoox|theoutnet|mandmdirect|tkmaxx/.test(host)) return "outlet";
   if (/thredup|therealreal|sellpy|secondhand/.test(host)) return "second_hand";
   return "unknown";
