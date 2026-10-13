@@ -3,7 +3,7 @@ import { fetchPinnedProductPage, type PinnedFetchTransport } from "./pinned-fetc
 import type { DnsResolver } from "./url-security.ts";
 import { getTitleCoverage } from "./title-match.ts";
 import { compareProductConditions, normalizeProductCondition } from "./product-condition.ts";
-import { retailerPageRobotsAllowed } from "./retailer-discovery.ts";
+import { getRetailerDomain, retailerPageRobotsAllowed } from "./retailer-discovery.ts";
 
 export interface RetailerPageSeed {
   itemId: string;
@@ -47,6 +47,14 @@ export interface VerifiedRetailerOffer {
   availability: string;
   source: "retailer_page";
   last_verified_at: string;
+}
+
+export interface RetailerPageVerificationAttempt {
+  offer: VerifiedRetailerOffer | null;
+  finalUrl: string;
+  status: number | null;
+  errorCode: string | null;
+  evidence: { title?: string; hasPrice: boolean; currency?: string; hasImage: boolean };
 }
 
 interface RetailerPageIdentityMatch {
@@ -121,25 +129,46 @@ export function retailerPageMatchesProduct(seed: RetailerPageSeed, metadata: Ret
   return assessRetailerPageIdentity(seed, metadata) !== null;
 }
 
-export async function verifyRetailerProductPage(
+export async function inspectAndVerifyRetailerProductPage(
   url: string,
   seed: RetailerPageSeed,
   resolveDns: DnsResolver,
   transport: PinnedFetchTransport,
   now = new Date().toISOString(),
-): Promise<VerifiedRetailerOffer | null> {
-  if (!await retailerPageRobotsAllowed(url, resolveDns, transport)) return null;
-  const page = await fetchPinnedProductPage(url, resolveDns, transport, {
-    maxBodyBytes: 1.5 * 1024 * 1024, timeoutMs: 5_000, maxRedirects: 3,
-    onRedirect: (target) => retailerPageRobotsAllowed(target.href, resolveDns, transport),
-  });
-  if (page.status < 200 || page.status >= 300 || page.truncated) return null;
+): Promise<RetailerPageVerificationAttempt> {
+  const domain = getRetailerDomain(url);
+  if (!domain) return { offer: null, finalUrl: url, status: null, errorCode: "invalid_url", evidence: { hasPrice: false, hasImage: false } };
+  if (!await retailerPageRobotsAllowed(url, resolveDns, transport)) {
+    return { offer: null, finalUrl: url, status: null, errorCode: "robots_restricted", evidence: { hasPrice: false, hasImage: false } };
+  }
+  let page;
+  try {
+    page = await fetchPinnedProductPage(url, resolveDns, transport, {
+      maxBodyBytes: 1.5 * 1024 * 1024, timeoutMs: 5_000, maxRedirects: 3,
+      onRedirect: (target) => retailerPageRobotsAllowed(target.href, resolveDns, transport),
+    });
+  } catch {
+    return { offer: null, finalUrl: url, status: null, errorCode: "fetch_failed", evidence: { hasPrice: false, hasImage: false } };
+  }
+  if (page.status < 200 || page.status >= 300) {
+    return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: `http_${page.status}`, evidence: { hasPrice: false, hasImage: false } };
+  }
+  if (page.truncated) return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "response_truncated", evidence: { hasPrice: false, hasImage: false } };
+  const contentType = page.headers.get("content-type")?.toLowerCase() || "";
+  if (!contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
+    return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "not_html", evidence: { hasPrice: false, hasImage: false } };
+  }
   const metadata = parseProductMetadata(new TextDecoder().decode(page.body), page.finalUrl.href);
+  const evidence = { ...(metadata.title ? { title: metadata.title.slice(0, 300) } : {}), hasPrice: metadata.price != null, ...(metadata.currency ? { currency: metadata.currency } : {}), hasImage: Boolean(metadata.image_url) };
+  if (!metadata.title) return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "product_metadata_missing", evidence };
+  if (!metadata.price || !metadata.currency || metadata.price_conflict) {
+    return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "product_price_or_currency_missing", evidence };
+  }
   const identityMatch = assessRetailerPageIdentity(seed, metadata);
-  if (!identityMatch) return null;
+  if (!identityMatch) return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "product_identity_not_confirmed", evidence };
 
   const host = page.finalUrl.hostname.replace(/^www\./i, "");
-  return {
+  const offer: VerifiedRetailerOffer = {
     item_id: seed.itemId,
     product_id: seed.productId,
     variant_id: seed.variantId,
@@ -169,4 +198,15 @@ export async function verifyRetailerProductPage(
     source: "retailer_page",
     last_verified_at: now,
   };
+  return { offer, finalUrl: page.finalUrl.href, status: page.status, errorCode: null, evidence };
+}
+
+export async function verifyRetailerProductPage(
+  url: string,
+  seed: RetailerPageSeed,
+  resolveDns: DnsResolver,
+  transport: PinnedFetchTransport,
+  now = new Date().toISOString(),
+): Promise<VerifiedRetailerOffer | null> {
+  return (await inspectAndVerifyRetailerProductPage(url, seed, resolveDns, transport, now)).offer;
 }

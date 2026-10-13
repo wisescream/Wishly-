@@ -11,7 +11,7 @@ import { classifySerpApiFailure, parseSerpApiShoppingResponse } from "../_shared
 import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
 import { buildProductSearchQueries } from "../_shared/product-search.ts";
 import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/research-persistence.ts";
-import { verifyRetailerProductPage } from "../_shared/retailer-page-verification.ts";
+import { inspectAndVerifyRetailerProductPage } from "../_shared/retailer-page-verification.ts";
 import { classifySeller, getRetailerDomain, inferRetailerCountry } from "../_shared/retailer-discovery.ts";
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
@@ -413,9 +413,41 @@ serve(async (req) => {
           connect: async (address: string, port: number) => await Deno.connect({ hostname: address, port }),
           startTls: async (socket: unknown, hostname: string) => await Deno.startTls(socket as Deno.TcpConn, { hostname }),
         };
+        const queryDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([...new Set(queries)].join("|").toLowerCase().replace(/\s+/g, " ").trim()));
+        const queryHash = Array.from(new Uint8Array(queryDigest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const preference = preferenceByWishlist.get(item.wishlist_id);
         for (const candidate of allMatches.slice(0, 2)) {
           try {
-            const verified = await verifyRetailerProductPage(candidate.url, {
+            const domain = getRetailerDomain(candidate.url);
+            if (!domain) continue;
+            const countryCode = inferRetailerCountry(domain);
+            const { data: foundRetailers } = await admin.from("retailers")
+              .select("id,name,seller_type,is_supported,validation_status,reliability_score,last_successful_at")
+              .eq("canonical_domain", domain).eq("country_code", countryCode).limit(1);
+            let retailer = foundRetailers?.[0] || null;
+            if (!retailer) {
+              const { data: created, error: createError } = await admin.from("retailers").insert({
+                name: candidate.store || domain, domain, canonical_domain: domain, country_code: countryCode,
+                validation_status: "pending_inspection", seller_type: classifySeller(domain),
+                categories: [item.category || "fashion"], languages: preference?.language ? [preference.language] : [],
+                discovery_source: candidate.source === "openrouter_web_search" ? "openrouter" : "serpapi",
+                discovered_by_query: queryHash, is_supported: false,
+              }).select("id,name,seller_type,is_supported,validation_status,reliability_score,last_successful_at").maybeSingle();
+              retailer = created || null;
+              if (!retailer && createError?.code === "23505") {
+                const { data: raced } = await admin.from("retailers")
+                  .select("id,name,seller_type,is_supported,validation_status,reliability_score,last_successful_at")
+                  .eq("canonical_domain", domain).eq("country_code", countryCode).limit(1).maybeSingle();
+                retailer = raced || null;
+              }
+            }
+            const sourceProvider = candidate.source === "openrouter_web_search" ? "openrouter" : "serpapi";
+            await admin.from("retailer_discovery_events").insert({
+              retailer_id: retailer?.id || null, canonical_domain: domain, product_id: item.product_id || null,
+              source_provider: sourceProvider, source_query: queryHash, source_url: candidate.url,
+              outcome: "discovered", evidence: { result_title: candidate.listing_title, source: candidate.source, match_confidence: candidate.product_match_confidence },
+            });
+            const attempt = await inspectAndVerifyRetailerProductPage(candidate.url, {
               itemId: seed.id,
               productId: seed.product_id,
               variantId: seed.variant_id,
@@ -427,10 +459,28 @@ serve(async (req) => {
               condition: seed.condition,
               currency: seed.currency,
             }, (hostname, type) => Deno.resolveDns(hostname, type), verifyTransport);
-            if (verified) {
-              verifiedRows.push(verified);
+            if (attempt.offer) {
+              verifiedRows.push(attempt.offer);
               retailerPagesVerified++;
+            } else {
+              const errorCode = attempt.errorCode || "product_identity_not_confirmed";
+              const restricted = errorCode === "robots_restricted";
+              const unavailable = errorCode.startsWith("http_") || ["fetch_failed", "response_truncated"].includes(errorCode);
+              if (retailer?.id) await admin.from("retailers").update({
+                validation_status: retailer.validation_status === "validated" ? "validated" : restricted ? "restricted" : unavailable ? "temporarily_unavailable" : "discovered",
+                last_inspected_at: checkedAt, last_error: errorCode,
+                retry_after: new Date(Date.now() + (restricted ? 7 : unavailable ? 1 : 0.25) * 24 * 60 * 60 * 1000).toISOString(),
+                reliability_score: Math.max(0, Number(retailer.reliability_score ?? 0.5) - (restricted ? 0.05 : unavailable ? 0.02 : 0)),
+              }).eq("id", retailer.id);
             }
+            const errorCode = attempt.errorCode;
+            const outcome = attempt.offer ? "inspection_succeeded" : errorCode === "robots_restricted" ? "restricted" : "inspection_failed";
+            await admin.from("retailer_discovery_events").insert({
+              retailer_id: retailer?.id || null, canonical_domain: domain, product_id: item.product_id || null,
+              source_provider: sourceProvider, source_query: queryHash, source_url: attempt.finalUrl,
+              outcome, error_code: errorCode,
+              evidence: { ...attempt.evidence, status: attempt.status, ...(attempt.offer ? { match_type: attempt.offer.match_type, match_confidence: attempt.offer.product_match_confidence } : {}) },
+            });
           } catch (error) {
             const details = error && typeof error === "object" ? error as { name?: unknown } : {};
             console.error(JSON.stringify({
@@ -441,9 +491,6 @@ serve(async (req) => {
           }
         }
         if (verifiedRows.length) {
-          const queryDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([...new Set(queries)].join("|").toLowerCase().replace(/\s+/g, " ").trim()));
-          const queryHash = Array.from(new Uint8Array(queryDigest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-          const preference = preferenceByWishlist.get(item.wishlist_id);
           for (const verified of verifiedRows) {
             const domain = getRetailerDomain(verified.url);
             if (!domain) continue;
@@ -495,12 +542,6 @@ serve(async (req) => {
                 }).eq("id", retailer.id);
               }
             }
-            await admin.from("retailer_discovery_events").insert({
-              retailer_id: retailer?.id || null, canonical_domain: domain, product_id: item.product_id || null,
-              source_provider: "serpapi", source_query: queryHash, source_url: verified.url,
-              outcome: "inspection_succeeded",
-              evidence: { title: verified.listing_title, price: verified.price, currency: verified.currency, availability: verified.availability, match_type: verified.match_type, match_confidence: verified.product_match_confidence },
-            });
           }
         }
         const persistenceMatches = [...new Map([...allMatches, ...verifiedRows].map((offer: any) => [`${offer.source}:${offer.url}`, offer])).values()]
