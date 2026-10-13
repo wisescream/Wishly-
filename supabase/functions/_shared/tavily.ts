@@ -15,19 +15,31 @@ export function buildRetailerQueries(input: {
   title: string;
   brand?: string | null;
   model?: string | null;
+  sku?: string | null;
+  gtin?: string | null;
   variant?: string | null;
   category?: string | null;
   country?: string | null;
   language?: string | null;
 }): string[] {
-  const product = [input.brand, input.model, input.title, input.variant].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  const clean = (value: string | null | undefined) => String(value || "").replace(/[\r\n"]/g, " ").replace(/\s+/g, " ").trim();
+  const product = [input.brand, input.model, input.title, input.variant].map(clean).filter(Boolean).join(" ").slice(0, 150).trim();
   if (!product) return [];
-  const category = String(input.category || "fashion").trim();
-  const language = String(input.language || "").toLowerCase().split("-")[0];
+  const category = clean(input.category) || "fashion clothing shoes";
   const country = String(input.country || "").toUpperCase();
-  const localized = language === "fr" ? "vêtement chaussures boutique prix" : language === "es" ? "ropa zapatos tienda precio"
-    : language === "pt" ? "roupa sapatos loja preço" : language === "de" ? "Mode Schuhe Online-Shop Preis" : language === "it" ? "moda scarpe negozio prezzo"
-      : language === "tr" ? "giyim ayakkabı mağaza fiyat" : language === "ar" ? "ملابس أحذية متجر السعر" : "clothing shoes retailer price";
+  const languageByCountry: Record<string, string> = { MA: "fr", FR: "fr", ES: "es", PT: "pt", IT: "it", DE: "de", NL: "nl", BE: "fr", GB: "en", TR: "tr", US: "en", CA: "en" };
+  const language = String(input.language || languageByCountry[country] || "en").toLowerCase().split("-")[0];
+  const retailerWords: Record<string, string> = {
+    fr: "vêtements chaussures boutique prix mode",
+    es: "ropa zapatos tienda precio moda",
+    pt: "roupa sapatos loja preço moda",
+    de: "Kleidung Schuhe Modegeschäft Preis",
+    it: "abbigliamento scarpe negozio prezzo moda",
+    nl: "kleding schoenen modewinkel",
+    tr: "giyim ayakkabı mağaza fiyat moda",
+    ar: "ملابس أحذية متجر أزياء سعر",
+    en: "clothing shoes fashion retailer",
+  };
   const countryName: Record<string, string> = {
     MA: "Morocco Maroc المغرب", FR: "France", ES: "Spain España", PT: "Portugal", IT: "Italy Italia",
     DE: "Germany Deutschland", NL: "Netherlands Nederland", BE: "Belgium Belgique België", GB: "United Kingdom UK",
@@ -35,10 +47,21 @@ export function buildRetailerQueries(input: {
     SE: "Sweden Sverige", NO: "Norway Norge", DK: "Denmark Danmark", BR: "Brazil Brasil",
   };
   const localizedMarket = countryName[country] || country;
+  const nearbyMarkets: Record<string, Array<[string, string]>> = {
+    MA: [["FR", "fr"], ["ES", "es"]], FR: [["ES", "es"], ["IT", "it"]], ES: [["PT", "pt"], ["FR", "fr"]],
+    PT: [["ES", "es"], ["FR", "fr"]], IT: [["FR", "fr"], ["DE", "de"]], DE: [["NL", "nl"], ["FR", "fr"]],
+    NL: [["DE", "de"], ["BE", "nl"]], BE: [["FR", "fr"], ["NL", "nl"]], GB: [["FR", "fr"], ["DE", "de"]],
+    TR: [["DE", "de"], ["FR", "fr"]], US: [["CA", "en"], ["GB", "en"]], CA: [["US", "en"], ["GB", "en"]],
+    AU: [["GB", "en"], ["US", "en"]],
+  };
+  const alternatives = (nearbyMarkets[country] || [["GB", "en"], ["FR", "fr"]])
+    .map(([code, locale]) => `${countryName[code]} ${retailerWords[locale]}`);
+  const identifiers = [input.sku, input.gtin].map(clean).filter(Boolean).join(" ");
+  const exactReference = [product, identifiers].filter(Boolean).join(" ");
   return [...new Set([
-    `"${product}" ${category} retailer ${localizedMarket}`.trim(),
-    `${product} ${localized} ${localizedMarket}`.trim(),
-    `${product} independent shop outlet resale marketplace`.trim(),
+    `"${product}" ${identifiers} ${category} ${retailerWords[language] || retailerWords.en} ${localizedMarket}`.replace(/\s+/g, " ").trim(),
+    `"${exactReference}" ${category} ${retailerWords[language] || retailerWords.en} online shop retailer ${localizedMarket}`.replace(/\s+/g, " ").trim(),
+    `"${product}" ${category} independent boutique outlet discount resale second hand vintage marketplace ${alternatives.join(" ")}`.replace(/\s+/g, " ").trim(),
   ])].slice(0, 3);
 }
 

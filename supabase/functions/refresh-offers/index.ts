@@ -171,7 +171,8 @@ serve(async (req) => {
       }
     }
 
-    const variant = item.variant_id ? (await userClient.from("product_variants").select("name").eq("id", item.variant_id).maybeSingle()).data?.name : "";
+    const productVariant = item.variant_id ? (await userClient.from("product_variants").select("name,sku,gtin").eq("id", item.variant_id).maybeSingle()).data : null;
+    const variant = productVariant?.name || "";
     const productTitle = [item.title, variant].filter(Boolean).join(" ");
     const targetSize = sizeVariant(item.variant_label) || sizeVariant(variant);
     const targetGender = getGenderVariant(productTitle);
@@ -426,7 +427,7 @@ serve(async (req) => {
       tavilySearchError = !tavilyKey ? "Tavily is not configured. Add TAVILY_API_KEY and explicitly enable TAVILY_ALLOW_PAID_SEARCH to use it." : "Tavily discovery is disabled by project configuration.";
     }
     const tavilyQueries = buildRetailerQueries({
-      title: productTitle, brand: item.brand, model: item.model_number, variant: item.variant_label,
+      title: productTitle, brand: item.brand, model: item.model_number, sku: productVariant?.sku, gtin: productVariant?.gtin || item.gtin, variant: item.variant_label,
       category: item.category, country: targetCountry, language: userPreferences?.language,
     });
     const { data: knownRetailers } = await admin.from("retailers").select("canonical_domain")

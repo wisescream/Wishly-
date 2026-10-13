@@ -23,6 +23,33 @@ describe("Tavily discovery input normalization", () => {
     expect(turkey[0]).toContain("Turkey Türkiye");
   });
 
+  it("keeps item identifiers in focused searches and includes nearby international markets", () => {
+    const queries = buildRetailerQueries({
+      title: "Air Max 90",
+      brand: "Nike",
+      model: "CN8490-002",
+      sku: "CN8490-002",
+      gtin: "0194958641234",
+      category: "sneakers",
+      country: "MA",
+      language: "fr-MA",
+    });
+    expect(queries).toHaveLength(3);
+    expect(queries[0]).toContain("CN8490-002");
+    expect(queries[0]).toContain("0194958641234");
+    expect(queries[1]).toContain("vêtements chaussures");
+    expect(queries[2]).toContain("France");
+    expect(queries[2]).toContain("Spain España");
+  });
+
+  it("uses nearby markets for European searches while keeping the user's market first", () => {
+    const queries = buildRetailerQueries({ title: "Veja Campo", country: "DE", language: "de-DE" });
+    expect(queries[0]).toContain("Germany Deutschland");
+    expect(queries[1]).toContain("Kleidung Schuhe");
+    expect(queries[2]).toContain("Netherlands Nederland");
+    expect(queries[2]).toContain("France");
+  });
+
   it("drops malformed result URLs and validates search result fields", () => {
     const parsed = parseTavilyResponse({ results: [
       { title: "Shoe listing", url: "https://shop.example/shoe", content: "Nike model", score: 0.91 },
