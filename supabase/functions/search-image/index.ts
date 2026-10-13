@@ -47,7 +47,7 @@ serve(async (req) => {
     imageForm.append("image", new Blob([bytes], { type: upload.type }), "wishly-image.jpg");
     imageForm.append("api_key", key);
     const uploadController = new AbortController();
-    const uploadTimeout = setTimeout(() => uploadController.abort(), 12_000);
+    const uploadTimeout = setTimeout(() => uploadController.abort(), 25_000);
     const uploadStartedAt = Date.now();
     let uploaded: Response;
     try {
@@ -79,7 +79,7 @@ serve(async (req) => {
     search.searchParams.set("hl", market.hl);
     search.searchParams.set("api_key", key);
     const searchController = new AbortController();
-    const searchTimeout = setTimeout(() => searchController.abort(), 15_000);
+    const searchTimeout = setTimeout(() => searchController.abort(), 25_000);
     const searchStartedAt = Date.now();
     let response: Response;
     try { response = await fetch(search, { signal: searchController.signal }); }
