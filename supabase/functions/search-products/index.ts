@@ -126,7 +126,7 @@ serve(async (req) => {
     url.searchParams.set("hl", market.hl);
     url.searchParams.set("api_key", key);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 25000);
     let response: Response;
     const startedAt = Date.now();
     let statusCode: number | null = null;
