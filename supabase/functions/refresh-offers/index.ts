@@ -222,7 +222,7 @@ serve(async (req) => {
         searchUrl.searchParams.set("hl", market.hl);
         searchUrl.searchParams.set("api_key", apiKey!);
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
+        const timeout = setTimeout(() => controller.abort(), 15000);
         shoppingQueryCount++;
         const searchStartedAt = Date.now();
         let resultCount = 0;

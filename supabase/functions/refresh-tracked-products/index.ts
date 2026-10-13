@@ -140,7 +140,7 @@ serve(async (req) => {
         search.searchParams.set("hl", market.hl);
         search.searchParams.set("api_key", apiKey!);
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 9_000);
+        const timeout = setTimeout(() => controller.abort(), 15_000);
         const searchStartedAt = Date.now();
         let statusCode: number | null = null;
         let resultCount = 0;
