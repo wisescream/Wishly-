@@ -376,19 +376,28 @@ serve(async (req) => {
           const domain = getRetailerDomain(lead.url);
           if (!domain || !retailerFromUrl(lead.url) || inspectedDomains.has(domain)) continue;
           inspectedDomains.add(domain);
+          const retailerCountry = inferRetailerCountry(domain);
           const { data: existingRetailers } = await admin.from("retailers").select("id,name,seller_type,reliability_score,retry_after")
-            .eq("canonical_domain", domain).limit(1);
-          const existingRetailer = existingRetailers?.[0] || null;
+            .eq("canonical_domain", domain).eq("country_code", retailerCountry).limit(1);
+          let existingRetailer = existingRetailers?.[0] || null;
           if (existingRetailer?.retry_after && new Date(existingRetailer.retry_after).getTime() > Date.now()) continue;
           let retailerId = existingRetailer?.id || null;
           if (!retailerId) {
-            const { data: createdRetailer } = await admin.from("retailers").insert({
-              name: domain, domain, canonical_domain: domain, country_code: inferRetailerCountry(domain),
+            const { data: createdRetailer, error: createError } = await admin.from("retailers").insert({
+              name: domain, domain, canonical_domain: domain, country_code: retailerCountry,
               validation_status: "pending_inspection", seller_type: classifySeller(domain),
               categories: [item.category || "fashion"], languages: [userPreferences?.language || "en"],
               discovery_source: "tavily", discovered_by_query: queryHash, is_supported: false,
             }).select("id").maybeSingle();
             retailerId = createdRetailer?.id || null;
+            // The unique regional domain index is the concurrency guard. If a
+            // parallel search inserted the retailer after our lookup, reuse it.
+            if (!retailerId && createError?.code === "23505") {
+              const { data: racedRetailer } = await admin.from("retailers").select("id,name,seller_type,reliability_score,retry_after")
+                .eq("canonical_domain", domain).eq("country_code", retailerCountry).limit(1).maybeSingle();
+              existingRetailer = racedRetailer || null;
+              retailerId = racedRetailer?.id || null;
+            }
           }
           await admin.from("retailer_discovery_events").insert({
             retailer_id: retailerId, canonical_domain: domain, product_id: item.product_id || null,
