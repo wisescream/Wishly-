@@ -29,6 +29,26 @@ export function getRetailerDomain(rawUrl: string): string | null {
   } catch { return null; }
 }
 
+export function selectRetailerInspectionTargets<T extends {
+  url?: string | null;
+  source?: string | null;
+  product_match_confidence?: number | null;
+}>(offers: T[], limit: number): T[] {
+  const max = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 0;
+  if (!max) return [];
+  const seen = new Set<string>();
+  return offers
+    .filter((offer) => offer.source === "google_shopping" && Number(offer.product_match_confidence) >= 0.9 && typeof offer.url === "string")
+    .sort((left, right) => Number(right.product_match_confidence) - Number(left.product_match_confidence))
+    .filter((offer) => {
+      const domain = getRetailerDomain(offer.url!);
+      if (!domain || seen.has(domain)) return false;
+      seen.add(domain);
+      return true;
+    })
+    .slice(0, max);
+}
+
 export function safeCanonicalProductUrl(candidate: string | null | undefined, pageUrl: string): string {
   const pageDomain = getRetailerDomain(pageUrl);
   const candidateDomain = candidate ? getRetailerDomain(candidate) : null;
@@ -126,6 +146,14 @@ async function robotsAllowed(url: URL, resolveDns: DnsResolver, transport: Pinne
     robotsCache.set(host, rules);
   }
   return !rules.denied && robotsTxtAllowsPath(rules.body || "", `${url.pathname}${url.search}`);
+}
+
+export async function retailerPageRobotsAllowed(rawUrl: string, resolveDns: DnsResolver, transport: PinnedFetchTransport): Promise<boolean> {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    return await robotsAllowed(url, resolveDns, transport);
+  } catch { return false; }
 }
 
 export async function inspectRetailerProductPage(rawUrl: string, resolveDns: DnsResolver, transport: PinnedFetchTransport): Promise<Inspection> {

@@ -18,25 +18,36 @@ const productPage = (overrides: Record<string, unknown> = {}) => `<script type="
   ...overrides,
 })}</script>`;
 
-function transportFor(html: string): PinnedFetchTransport {
-  const body = new TextEncoder().encode(html);
-  const responseHeader = new TextEncoder().encode(`HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.length}\r\n\r\n`);
-  const bytes = new Uint8Array(responseHeader.length + body.length);
-  bytes.set(responseHeader);
-  bytes.set(body, responseHeader.length);
-  let offset = 0;
-  const socket: PinnedSocket = {
-    async write(value) { return value.length; },
-    async read(buffer) {
-      if (offset >= bytes.length) return null;
-      const count = Math.min(buffer.length, bytes.length - offset);
-      buffer.set(bytes.subarray(offset, offset + count));
-      offset += count;
-      return count;
+function transportFor(html: string, robotsText = "User-agent: *\nAllow: /"): PinnedFetchTransport {
+  return {
+    async connect() {
+      let request = "";
+      let offset = 0;
+      let bytes: Uint8Array | null = null;
+      const socket: PinnedSocket = {
+        async write(value) { request += new TextDecoder().decode(value); return value.length; },
+        async read(buffer) {
+          if (!bytes) {
+            const robots = request.split(" ")[1]?.endsWith("/robots.txt");
+            const body = new TextEncoder().encode(robots ? robotsText : html);
+            const contentType = robots ? "text/plain" : "text/html";
+            const responseHeader = new TextEncoder().encode(`HTTP/1.1 200 OK\r\nContent-Type: ${contentType}\r\nContent-Length: ${body.length}\r\n\r\n`);
+            bytes = new Uint8Array(responseHeader.length + body.length);
+            bytes.set(responseHeader);
+            bytes.set(body, responseHeader.length);
+          }
+          if (offset >= bytes.length) return null;
+          const count = Math.min(buffer.length, bytes.length - offset);
+          buffer.set(bytes.subarray(offset, offset + count));
+          offset += count;
+          return count;
+        },
+        close() {},
+      };
+      return socket;
     },
-    close() {},
+    async startTls(value) { return value; },
   };
-  return { async connect() { return socket; }, async startTls(value) { return value; } };
 }
 
 describe("retailer page offer verification", () => {
@@ -57,7 +68,7 @@ describe("retailer page offer verification", () => {
 
   it("returns a retailer-page price only after a bounded DNS-pinned fetch matches the product", async () => {
     const offer = await verifyRetailerProductPage(
-      "http://93.184.216.34/product",
+      "http://93.184.216.35/product",
       seed,
       async () => [],
       transportFor(productPage()),
@@ -68,6 +79,16 @@ describe("retailer page offer verification", () => {
       currency: "EUR", availability: "in_stock", condition: "new", product_match_confidence: 1,
       match_type: "retailer_page_verified_gtin",
     });
+  });
+
+  it("does not inspect product pages disallowed by robots.txt", async () => {
+    const offer = await verifyRetailerProductPage(
+      "http://93.184.216.36/product",
+      seed,
+      async () => [],
+      transportFor(productPage(), "User-agent: *\nDisallow: /product"),
+    );
+    expect(offer).toBeNull();
   });
 
   it("does not assign perfect identity confidence when a retailer page has no GTIN", async () => {

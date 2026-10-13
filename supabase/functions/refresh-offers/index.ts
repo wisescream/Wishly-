@@ -11,7 +11,7 @@ import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
 import { buildRetailerQueries, searchTavily } from "../_shared/tavily.ts";
 import { parseSearXNGResponse, searchSearXNG } from "../_shared/searxng.ts";
-import { classifySeller, getRetailerDomain, inferRetailerCountry, inspectRetailerProductPage, productOfferEvidenceError } from "../_shared/retailer-discovery.ts";
+import { classifySeller, getRetailerDomain, inferRetailerCountry, inspectRetailerProductPage, productOfferEvidenceError, selectRetailerInspectionTargets } from "../_shared/retailer-discovery.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
 
 const retailerDns = (hostname: string, recordType: "A" | "AAAA") => Deno.resolveDns(hostname, recordType);
@@ -202,6 +202,8 @@ serve(async (req) => {
     let searxngSearchError: string | null = null;
     let searxngQueriesCount = 0;
     let retailerPagesInspected = 0;
+    let inspectionBudget = 0;
+    const inspectedDomains = new Set<string>();
     if (apiKey) {
       for (const searchQuery of searchQueries.slice(0, 3)) {
         const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SERPAPI_DAILY_SEARCH_LIMIT") || "31", 10) || 31));
@@ -309,6 +311,112 @@ serve(async (req) => {
       }];
     });
 
+    // Structured Shopping results are useful retailer leads even when Tavily is
+    // unavailable. Inspect a bounded set of high-confidence listings directly;
+    // only page evidence can validate the retailer or create a verified offer.
+    for (const lead of selectRetailerInspectionTargets(offerRows, 3)) {
+      if (inspectionBudget >= 3) break;
+      const domain = getRetailerDomain(lead.url);
+      if (!domain || !retailerFromUrl(lead.url) || inspectedDomains.has(domain)) continue;
+      inspectedDomains.add(domain);
+      const retailerCountry = inferRetailerCountry(domain);
+      const { data: retailerRows } = await admin.from("retailers")
+        .select("id,name,seller_type,is_supported,reliability_score,retry_after,last_successful_at,trust_evidence")
+        .eq("canonical_domain", domain).eq("country_code", retailerCountry).limit(1);
+      let existingRetailer = retailerRows?.[0] || null;
+      if (existingRetailer?.retry_after && new Date(existingRetailer.retry_after).getTime() > Date.now()) continue;
+      let retailerId = existingRetailer?.id || null;
+      if (!retailerId) {
+        const { data: createdRetailer, error: createError } = await admin.from("retailers").insert({
+          name: lead.store || domain, domain, canonical_domain: domain, country_code: retailerCountry,
+          validation_status: "pending_inspection", seller_type: classifySeller(domain),
+          categories: [item.category || "fashion"], languages: [userPreferences?.language || "en"],
+          discovery_source: "serpapi", discovered_by_query: "google_shopping", is_supported: false,
+        }).select("id,name,seller_type,is_supported,reliability_score,retry_after,last_successful_at,trust_evidence").maybeSingle();
+        existingRetailer = createdRetailer || null;
+        retailerId = createdRetailer?.id || null;
+        if (!retailerId && createError?.code === "23505") {
+          const { data: racedRetailer } = await admin.from("retailers")
+            .select("id,name,seller_type,is_supported,reliability_score,retry_after,last_successful_at,trust_evidence")
+            .eq("canonical_domain", domain).eq("country_code", retailerCountry).limit(1).maybeSingle();
+          existingRetailer = racedRetailer || null;
+          retailerId = racedRetailer?.id || null;
+        }
+      }
+
+      const queryText = searchQueries.join("|").toLowerCase().replace(/\s+/g, " ").trim();
+      const queryDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(queryText));
+      const queryHash = Array.from(new Uint8Array(queryDigest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+      await admin.from("retailer_discovery_events").insert({
+        retailer_id: retailerId, canonical_domain: domain, product_id: item.product_id || null,
+        source_provider: "serpapi", source_query: queryHash, source_url: lead.url,
+        outcome: "discovered", evidence: { result_title: lead.listing_title, seller: lead.store, match_confidence: lead.product_match_confidence },
+      });
+
+      inspectionBudget++;
+      retailerPagesInspected++;
+      const inspection = await inspectRetailerProductPage(lead.url, retailerDns, retailerTransport);
+      const metadata = inspection.metadata;
+      if (!inspection.permitted || inspection.errorCode || !metadata?.title) {
+        const restricted = inspection.errorCode === "robots_restricted" || inspection.errorCode === "unsafe_url";
+        const unavailable = inspection.errorCode?.startsWith("http_") || ["fetch_failed", "fetch_unknown"].includes(inspection.errorCode || "");
+        if (retailerId) await admin.from("retailers").update({
+          validation_status: restricted ? "restricted" : unavailable ? "temporarily_unavailable" : "discovered",
+          last_inspected_at: new Date().toISOString(), last_error: inspection.errorCode,
+          retry_after: new Date(Date.now() + (restricted ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString(),
+          reliability_score: Math.max(0, Number(existingRetailer?.reliability_score ?? 0.5) - (restricted ? 0.1 : 0.05)),
+        }).eq("id", retailerId);
+        await admin.from("retailer_discovery_events").insert({
+          retailer_id: retailerId, canonical_domain: domain, product_id: item.product_id || null,
+          source_provider: "serpapi", source_query: queryHash, source_url: inspection.finalUrl,
+          outcome: restricted ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
+          evidence: { status: inspection.status },
+        });
+        continue;
+      }
+
+      const pageTitle = [metadata.title, metadata.brand, metadata.model_number, metadata.variant_name].filter(Boolean).join(" ");
+      const pageMatch = matchListing(pageTitle, matchTarget, [metadata.gtin, metadata.sku], metadata.condition);
+      const pageCurrency = resolveProviderCurrency(metadata.currency, "");
+      const pageIdentityConfirmed = Boolean(pageMatch && pageMatch.confidence >= 0.9 && !pageMatch.matchType.includes("unconfirmed"));
+      const validationError = productOfferEvidenceError(pageIdentityConfirmed, metadata.price, pageCurrency);
+      const verifiedRetailer = validationError === null;
+      const sellerType = classifySeller(inspection.canonicalDomain || domain);
+      const observedAt = new Date().toISOString();
+      if (retailerId) await admin.from("retailers").update({
+        validation_status: verifiedRetailer ? "validated" : "discovered",
+        seller_type: sellerType === "unknown" ? existingRetailer?.seller_type || "unknown" : sellerType,
+        is_supported: verifiedRetailer ? true : existingRetailer?.is_supported || false,
+        last_inspected_at: observedAt,
+        last_successful_at: verifiedRetailer ? observedAt : existingRetailer?.last_successful_at || null,
+        last_error: validationError,
+        retry_after: new Date(Date.now() + (verifiedRetailer ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString(),
+        reliability_score: Math.max(0, Math.min(1, Number(existingRetailer?.reliability_score ?? 0.5) + (verifiedRetailer ? 0.02 : -0.03))),
+        extraction_capabilities: { title: true, image: Boolean(metadata.image_url), price: metadata.price != null, currency: Boolean(metadata.currency), variants: metadata.variants.length > 0 },
+        trust_evidence: verifiedRetailer ? "Accessible product page confirmed product identity, price, and currency. This does not establish seller authorization or authenticity." : existingRetailer?.trust_evidence || null,
+      }).eq("id", retailerId);
+      await admin.from("retailer_discovery_events").insert({
+        retailer_id: retailerId, canonical_domain: domain, product_id: item.product_id || null,
+        source_provider: "serpapi", source_query: queryHash, source_url: inspection.finalUrl,
+        outcome: verifiedRetailer ? "inspection_succeeded" : "inspection_failed", error_code: validationError,
+        evidence: { title: metadata.title, price: metadata.price, currency: metadata.currency, has_image: Boolean(metadata.image_url), variant_count: metadata.variants.length },
+      });
+      if (pageMatch && metadata.price && pageCurrency) offerRows.push({
+        item_id: item.id, product_id: item.product_id, variant_id: item.variant_id,
+        store: existingRetailer?.name || lead.store || domain, seller: domain, listing_title: metadata.title.slice(0, 300), image_url: metadata.image_url,
+        seller_type: sellerType === "unknown" ? existingRetailer?.seller_type || "unknown" : sellerType,
+        size_label: pageMatch.candidateSize?.label || null, size_system: pageMatch.candidateSize?.system || null, color_label: pageMatch.candidateColor,
+        product_match_confidence: pageMatch.confidence, match_type: pageMatch.matchType,
+        price: metadata.price, currency: pageCurrency, url: metadata.canonical_url || inspection.finalUrl,
+        original_price: metadata.original_price, discount_percent: metadata.discount_percent,
+        shipping_cost: 0, taxes: 0, total_price: null, delivery_estimate: null,
+        shipping_known: false, taxes_known: false, total_is_estimated: true,
+        destination_country: userPreferences?.country || null, condition: normalizeProductCondition(metadata.condition),
+        availability: metadata.availability, source: "serpapi_crawled_page", last_verified_at: observedAt,
+        is_verified: pageIdentityConfirmed,
+      });
+    }
+
     // Expanded discovery is opt-in in both the UI request and server config.
     // No Tavily or OpenRouter web-search request can spend provider quota from
     // the background worker or a normal Google Shopping refresh.
@@ -326,8 +434,6 @@ serve(async (req) => {
       .in("country_code", [...new Set([targetCountry || "MA", "GLOBAL"])])
       .limit(20);
     const knownDomains = (knownRetailers || []).map((retailer) => String(retailer.canonical_domain || "")).filter(Boolean);
-    const inspectedDomains = new Set<string>();
-    let inspectionBudget = 0;
     if (tavilyEnabled && !offerRows.some((offer) => offer.product_match_confidence >= 0.9)) {
       for (const [queryIndex, query] of tavilyQueries.slice(0, 3).entries()) {
         const includeDomains = queryIndex === 1 ? knownDomains : [];

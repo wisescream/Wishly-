@@ -12,6 +12,7 @@ import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
 import { buildProductSearchQueries } from "../_shared/product-search.ts";
 import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/research-persistence.ts";
 import { verifyRetailerProductPage } from "../_shared/retailer-page-verification.ts";
+import { classifySeller, getRetailerDomain, inferRetailerCountry } from "../_shared/retailer-discovery.ts";
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
 
@@ -61,7 +62,7 @@ serve(async (req) => {
 
     const now = new Date();
     const { data: due, error } = await admin.from("items")
-      .select("id,wishlist_id,title,brand,model_number,gtin,variant_label,condition,product_id,variant_id,currency,last_offer_search_at,next_offer_search_at,offer_search_attempts,target_price,priority,status")
+      .select("id,wishlist_id,title,brand,model_number,gtin,variant_label,condition,category,product_id,variant_id,currency,last_offer_search_at,next_offer_search_at,offer_search_attempts,target_price,priority,status")
       .eq("status", "wanted").or(`next_offer_search_at.is.null,next_offer_search_at.lte.${now.toISOString()}`)
       .order("next_offer_search_at", { ascending: true, nullsFirst: true })
       .order("target_price", { ascending: true, nullsFirst: false })
@@ -437,6 +438,69 @@ serve(async (req) => {
               item_id: seed.id,
               error_name: typeof details.name === "string" ? details.name.slice(0, 40) : "unknown_error",
             }));
+          }
+        }
+        if (verifiedRows.length) {
+          const queryDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([...new Set(queries)].join("|").toLowerCase().replace(/\s+/g, " ").trim()));
+          const queryHash = Array.from(new Uint8Array(queryDigest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+          const preference = preferenceByWishlist.get(item.wishlist_id);
+          for (const verified of verifiedRows) {
+            const domain = getRetailerDomain(verified.url);
+            if (!domain) continue;
+            const countryCode = inferRetailerCountry(domain);
+            const { data: retailerRows } = await admin.from("retailers")
+              .select("id,name,seller_type,is_supported,reliability_score,categories,languages,extraction_capabilities,trust_evidence")
+              .eq("canonical_domain", domain).eq("country_code", countryCode).limit(1);
+            let retailer = retailerRows?.[0] || null;
+            const sellerType = classifySeller(domain);
+            const observedAt = verified.last_verified_at || checkedAt;
+            if (retailer) {
+              const { data: updatedRetailer } = await admin.from("retailers").update({
+                validation_status: "validated", is_supported: true, last_inspected_at: observedAt,
+                last_successful_at: observedAt, last_error: null,
+                retry_after: new Date(Date.parse(observedAt) + 7 * 24 * 60 * 60 * 1000).toISOString(),
+                seller_type: retailer.seller_type === "unknown" ? sellerType : retailer.seller_type,
+                categories: [...new Set([...(retailer.categories || []), item.category || "fashion"])],
+                languages: [...new Set([...(retailer.languages || []), ...(preference?.language ? [preference.language] : [])])],
+                reliability_score: Math.min(1, Number(retailer.reliability_score ?? 0.5) + 0.02),
+                extraction_capabilities: { ...(retailer.extraction_capabilities || {}), title: true, image: Boolean(verified.image_url), price: true, currency: true },
+                trust_evidence: retailer.trust_evidence || "Public product page confirmed product identity, a current price, and currency; this does not establish seller authorization or authenticity.",
+              }).eq("id", retailer.id).select("id,name,seller_type").maybeSingle();
+              retailer = updatedRetailer || retailer;
+            } else {
+              const { data: createdRetailer, error: createError } = await admin.from("retailers").insert({
+                name: verified.store || domain, domain, canonical_domain: domain, country_code: countryCode,
+                validation_status: "validated", seller_type: sellerType, categories: [item.category || "fashion"],
+                languages: preference?.language ? [preference.language] : [], discovery_source: "serpapi",
+                discovered_by_query: queryHash, trust_evidence: "Public product page confirmed product identity, a current price, and currency; this does not establish seller authorization or authenticity.",
+                extraction_capabilities: { title: true, image: Boolean(verified.image_url), price: true, currency: true },
+                first_discovered_at: observedAt, last_inspected_at: observedAt, last_successful_at: observedAt,
+                reliability_score: 0.75, is_supported: true,
+                retry_after: new Date(Date.parse(observedAt) + 7 * 24 * 60 * 60 * 1000).toISOString(),
+              }).select("id,name,seller_type").maybeSingle();
+              retailer = createdRetailer || null;
+              if (!retailer && createError?.code === "23505") {
+                const { data: racedRetailer } = await admin.from("retailers")
+                  .select("id,name,seller_type,is_supported,reliability_score,categories,languages,extraction_capabilities,trust_evidence")
+                  .eq("canonical_domain", domain).eq("country_code", countryCode).limit(1).maybeSingle();
+                retailer = racedRetailer || null;
+                if (retailer) await admin.from("retailers").update({
+                  validation_status: "validated", is_supported: true, last_inspected_at: observedAt, last_successful_at: observedAt,
+                  last_error: null, retry_after: new Date(Date.parse(observedAt) + 7 * 24 * 60 * 60 * 1000).toISOString(),
+                  categories: [...new Set([...(retailer.categories || []), item.category || "fashion"])],
+                  languages: [...new Set([...(retailer.languages || []), ...(preference?.language ? [preference.language] : [])])],
+                  reliability_score: Math.min(1, Number(retailer.reliability_score ?? 0.5) + 0.02),
+                  extraction_capabilities: { ...(retailer.extraction_capabilities || {}), title: true, image: Boolean(verified.image_url), price: true, currency: true },
+                  trust_evidence: retailer.trust_evidence || "Public product page confirmed product identity, a current price, and currency; this does not establish seller authorization or authenticity.",
+                }).eq("id", retailer.id);
+              }
+            }
+            await admin.from("retailer_discovery_events").insert({
+              retailer_id: retailer?.id || null, canonical_domain: domain, product_id: item.product_id || null,
+              source_provider: "serpapi", source_query: queryHash, source_url: verified.url,
+              outcome: "inspection_succeeded",
+              evidence: { title: verified.listing_title, price: verified.price, currency: verified.currency, availability: verified.availability, match_type: verified.match_type, match_confidence: verified.product_match_confidence },
+            });
           }
         }
         const persistenceMatches = [...new Map([...allMatches, ...verifiedRows].map((offer: any) => [`${offer.source}:${offer.url}`, offer])).values()]

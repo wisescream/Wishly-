@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifySeller, getRetailerDomain, inferRetailerCountry, productOfferEvidenceError, robotsTxtAllowsPath, safeCanonicalProductUrl } from "./retailer-discovery.ts";
+import { classifySeller, getRetailerDomain, inferRetailerCountry, productOfferEvidenceError, robotsTxtAllowsPath, safeCanonicalProductUrl, selectRetailerInspectionTargets } from "./retailer-discovery.ts";
 
 describe("retailer discovery utilities", () => {
   it("normalizes public retailer domains and rejects unsafe URL shapes", () => {
@@ -41,6 +41,19 @@ describe("retailer discovery utilities", () => {
     expect(safeCanonicalProductUrl("https://www.shop.example/item?variant=1", "https://shop.example/product")).toBe("https://www.shop.example/item?variant=1");
     expect(safeCanonicalProductUrl("https://attacker.example/collect", "https://shop.example/product")).toBe("https://shop.example/product");
     expect(safeCanonicalProductUrl("http://shop.example/product", "https://shop.example/product")).toBe("https://shop.example/product");
+  });
+
+  it("selects bounded, high-confidence Shopping retailers once per domain", () => {
+    const best = { source: "google_shopping", url: "https://www.shop.example/nike-shoe", product_match_confidence: 0.98 };
+    const other = { source: "google_shopping", url: "https://boutique.ma/item", product_match_confidence: 0.93 };
+    expect(selectRetailerInspectionTargets([
+      best,
+      { ...best, url: "https://shop.example/duplicate", product_match_confidence: 0.96 },
+      other,
+      { ...other, source: "tavily_crawled_page" },
+      { ...other, url: "https://possible.example/item", product_match_confidence: 0.84 },
+    ], 2)).toEqual([best, other]);
+    expect(selectRetailerInspectionTargets([best], 0)).toEqual([]);
   });
 });
 

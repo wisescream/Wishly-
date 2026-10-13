@@ -3,6 +3,7 @@ import { fetchPinnedProductPage, type PinnedFetchTransport } from "./pinned-fetc
 import type { DnsResolver } from "./url-security.ts";
 import { getTitleCoverage } from "./title-match.ts";
 import { compareProductConditions, normalizeProductCondition } from "./product-condition.ts";
+import { retailerPageRobotsAllowed } from "./retailer-discovery.ts";
 
 export interface RetailerPageSeed {
   itemId: string;
@@ -127,7 +128,11 @@ export async function verifyRetailerProductPage(
   transport: PinnedFetchTransport,
   now = new Date().toISOString(),
 ): Promise<VerifiedRetailerOffer | null> {
-  const page = await fetchPinnedProductPage(url, resolveDns, transport, { maxBodyBytes: 1.5 * 1024 * 1024, timeoutMs: 5_000, maxRedirects: 3 });
+  if (!await retailerPageRobotsAllowed(url, resolveDns, transport)) return null;
+  const page = await fetchPinnedProductPage(url, resolveDns, transport, {
+    maxBodyBytes: 1.5 * 1024 * 1024, timeoutMs: 5_000, maxRedirects: 3,
+    onRedirect: (target) => retailerPageRobotsAllowed(target.href, resolveDns, transport),
+  });
   if (page.status < 200 || page.status >= 300 || page.truncated) return null;
   const metadata = parseProductMetadata(new TextDecoder().decode(page.body), page.finalUrl.href);
   const identityMatch = assessRetailerPageIdentity(seed, metadata);
