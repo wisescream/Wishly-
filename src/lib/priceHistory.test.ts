@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PricePoint } from '@/types/database';
-import { getPriceHistoryXPosition, groupPriceHistoryByListing, summarizePriceHistory } from './priceHistory';
+import { getPriceHistoryXPosition, groupPriceHistoryByListing, resolvePriceHistoryCurrency, summarizePriceHistory } from './priceHistory';
 
 const now = Date.parse('2026-10-10T12:00:00Z');
 const point = (id: string, price: number, currency: string, daysAgo: number): PricePoint => ({
@@ -49,6 +49,24 @@ describe('groupPriceHistoryByListing', () => {
     const series = groupPriceHistoryByListing([firstOffer, original, secondOffer]);
     expect(series.map(({ key }) => key)).toEqual(['original', 'offer:offer-a', 'offer:offer-b']);
     expect(series.map(({ points }) => points.map(({ id }) => id))).toEqual([['original'], ['offer-a'], ['offer-b']]);
+  });
+});
+
+describe('resolvePriceHistoryCurrency', () => {
+  it('uses the preferred currency when the selected listing has observations in it', () => {
+    expect(resolvePriceHistoryCurrency([point('usd', 10, 'USD', 2), point('mad', 100, 'MAD', 1)], 'MAD', 7, now)).toBe('MAD');
+  });
+
+  it('uses the latest native listing currency when the preferred currency is absent', () => {
+    expect(resolvePriceHistoryCurrency([point('old', 10, 'USD', 10), point('new', 100, 'EUR', 1)], 'MAD', 7, now)).toBe('EUR');
+  });
+
+  it('keeps the preferred currency for an empty series', () => {
+    expect(resolvePriceHistoryCurrency([], 'MAD', 7, now)).toBe('MAD');
+  });
+
+  it('chooses the latest in-range currency when the preferred currency is only stale', () => {
+    expect(resolvePriceHistoryCurrency([point('stale', 10, 'MAD', 40), point('recent', 12, 'USD', 2)], 'MAD', 7, now)).toBe('USD');
   });
 });
 

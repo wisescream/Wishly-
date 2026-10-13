@@ -27,7 +27,7 @@ export interface AlertOffer {
 
 export function getAlertSourceLabel(source: string | null | undefined): string {
   if (source === "retailer_page") return "Retailer product page";
-  if (source === "openrouter_web_search") return "Web search snippet";
+  if (source === "openrouter_web_search" || source === "tavily_web_search") return "Web search snippet";
   if (source === "google_shopping") return "Google Shopping";
   return "Configured search source";
 }

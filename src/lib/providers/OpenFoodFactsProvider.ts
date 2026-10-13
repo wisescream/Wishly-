@@ -1,5 +1,5 @@
 import type { ProviderAdapter } from "./types";
-import type { ProductCandidate, FetchedOffer } from "@/types/database";
+import type { ProductCandidate } from "@/types/database";
 
 export const OpenFoodFactsProvider: ProviderAdapter = {
   id: "openfoodfacts",
@@ -61,9 +61,5 @@ export const OpenFoodFactsProvider: ProviderAdapter = {
     } catch {
       return null;
     }
-  },
-
-  async findOffersForProduct(): Promise<FetchedOffer[]> {
-    return [];
   },
 };

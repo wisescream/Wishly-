@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseProductMetadata } from "./product-metadata.ts";
-import { inspectAndVerifyRetailerProductPage, retailerPageMatchesProduct, verifyRetailerProductPage } from "./retailer-page-verification.ts";
+import { findProductVariantColor, inspectAndVerifyRetailerProductPage, retailerPageMatchesProduct, verifyRetailerProductPage } from "./retailer-page-verification.ts";
 import type { PinnedFetchTransport, PinnedSocket } from "./pinned-fetch.ts";
 
 const seed = {
@@ -51,6 +51,11 @@ function transportFor(html: string, robotsText = "User-agent: *\nAllow: /"): Pin
 }
 
 describe("retailer page offer verification", () => {
+  it("does not treat a color word in the brand as the product color", () => {
+    expect(findProductVariantColor("Black & Decker 20V Drill", "Black & Decker")).toBeNull();
+    expect(findProductVariantColor("Black & Decker Black 20V Drill", "Black & Decker")).toBe("black");
+  });
+
   it("requires matching identity, requested variant, valid price, and currency", () => {
     const matches = parseProductMetadata(productPage(), "https://shop.example/headphones");
     expect(retailerPageMatchesProduct(seed, matches)).toBe(true);
@@ -64,6 +69,35 @@ describe("retailer page offer verification", () => {
       offers: { price: "199.00", priceCurrency: "EUR", itemCondition: "https://schema.org/RefurbishedCondition" },
     });
     expect(retailerPageMatchesProduct(seed, parseProductMetadata(refurbished, "https://shop.example/headphones"))).toBe(false);
+  });
+
+  it("does not let a matching GTIN override an explicitly different color, capacity, or size", () => {
+    const colorPage = parseProductMetadata(productPage({ color: "Silver" }), "https://shop.example/headphones");
+    const capacityPage = parseProductMetadata(productPage({ storageCapacity: "512 GB" }), "https://shop.example/headphones");
+    const sizePage = parseProductMetadata(productPage({ size: "EU 39" }), "https://shop.example/headphones");
+    expect(retailerPageMatchesProduct({ ...seed, title: `${seed.title} Black` }, colorPage)).toBe(false);
+    expect(retailerPageMatchesProduct({ ...seed, title: `${seed.title} 256GB` }, capacityPage)).toBe(false);
+    expect(retailerPageMatchesProduct({ ...seed, variantLabel: "EU 40" }, sizePage)).toBe(false);
+  });
+
+  it("does not verify a gendered product from a same-GTIN listing with a different or unstated gender", () => {
+    const target = { ...seed, title: "Nike Women's Pegasus Black", brand: "Nike", modelNumber: null };
+    const malePage = parseProductMetadata(productPage({ name: "Nike Men's Pegasus Black", brand: { name: "Nike" } }), "https://shop.example/shoe");
+    const unspecifiedPage = parseProductMetadata(productPage({ name: "Nike Pegasus Black", brand: { name: "Nike" } }), "https://shop.example/shoe");
+    const matchingPage = parseProductMetadata(productPage({ name: "Nike Women's Pegasus Black", brand: { name: "Nike" }, size: "US women's 8" }), "https://shop.example/shoe");
+    expect(retailerPageMatchesProduct(target, malePage)).toBe(false);
+    expect(retailerPageMatchesProduct(target, unspecifiedPage)).toBe(false);
+    expect(retailerPageMatchesProduct({ ...target, variantLabel: "US 8" }, matchingPage)).toBe(true);
+  });
+
+  it("does not mistake a color word in the brand name for the saved product color", () => {
+    const target = { ...seed, title: "Black & Decker Red Drill", brand: "Black & Decker", modelNumber: null, variantLabel: "Red" };
+    const page = parseProductMetadata(productPage({
+      name: "Black & Decker Drill",
+      brand: { name: "Black & Decker" },
+      color: "Blue",
+    }), "https://shop.example/drill");
+    expect(retailerPageMatchesProduct(target, page)).toBe(false);
   });
 
   it("returns a retailer-page price only after a bounded DNS-pinned fetch matches the product", async () => {

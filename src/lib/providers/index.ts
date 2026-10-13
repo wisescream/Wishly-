@@ -4,7 +4,7 @@ import { MoroccanRetailersProvider } from "./MoroccanRetailersProvider";
 import { UpcItemDbProvider } from "./UpcItemDbProvider";
 import { OpenFoodFactsProvider } from "./OpenFoodFactsProvider";
 import { GoogleShoppingProvider } from "./GoogleShoppingProvider";
-import type { ProductCandidate, FetchedOffer } from "@/types/database";
+import type { ProductCandidate } from "@/types/database";
 import { evaluateProductMatch } from "../matching/productMatcher";
 
 export const activeProviders: ProviderAdapter[] = [
@@ -73,44 +73,4 @@ export async function lookupBarcodeGlobal(barcode: string): Promise<ProductCandi
   }
 
   return null;
-}
-
-/**
- * Finds matching retailer offers worldwide for an identified product
- */
-export async function discoverOffersForProduct(product: {
-  title: string;
-  brand?: string | null;
-  model_number?: string | null;
-  gtin?: string | null;
-}): Promise<FetchedOffer[]> {
-  const promises = activeProviders.map(async (p) => {
-    try {
-      return await p.findOffersForProduct(product);
-    } catch {
-      return [];
-    }
-  });
-
-  const nested = await Promise.all(promises);
-  const allOffers = nested.flat();
-
-  // Deduplicate offers by store + url
-  const seen = new Set<string>();
-  const uniqueOffers: FetchedOffer[] = [];
-  for (const o of allOffers) {
-    const key = `${o.store.toLowerCase()}-${o.url}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueOffers.push(o);
-    }
-  }
-
-  // Sort offers by price if known, with live direct search links at the end
-  return uniqueOffers.sort((a, b) => {
-    if (a.price > 0 && b.price > 0) return a.price - b.price;
-    if (a.price > 0) return -1;
-    if (b.price > 0) return 1;
-    return 0;
-  });
 }

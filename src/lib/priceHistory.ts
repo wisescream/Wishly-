@@ -15,6 +15,20 @@ export interface PriceHistorySeries {
   points: PricePoint[];
 }
 
+export function resolvePriceHistoryCurrency(points: PricePoint[], preferredCurrency: string, days = 365, now = Date.now()): string {
+  const preferred = preferredCurrency.toUpperCase();
+  const valid = (points || []).filter((point) => typeof point.currency === 'string'
+    && /^[A-Z]{3}$/i.test(point.currency)
+    && Number.isFinite(Date.parse(point.recorded_at))
+    && Number.isFinite(Number(point.price)) && Number(point.price) > 0);
+  const cutoff = now - Math.max(1, days) * 24 * 60 * 60 * 1000;
+  const inPeriod = valid.filter((point) => Date.parse(point.recorded_at) >= cutoff && Date.parse(point.recorded_at) <= now);
+  const candidates = inPeriod.length ? inPeriod : valid;
+  if (candidates.some((point) => point.currency.toUpperCase() === preferred)) return preferred;
+  return [...candidates]
+    .sort((a, b) => Date.parse(b.recorded_at) - Date.parse(a.recorded_at))[0]?.currency.toUpperCase() || preferred;
+}
+
 export function groupPriceHistoryByListing(points: PricePoint[]): PriceHistorySeries[] {
   const byKey = new Map<string, PriceHistorySeries>();
   for (const point of points || []) {

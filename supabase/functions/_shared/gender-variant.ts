@@ -1,6 +1,7 @@
 export function getGenderVariant(value: string): "women" | "men" | "unisex" | null {
-  if (/\b(?:women'?s|female)\b/i.test(value)) return "women";
-  if (/\b(?:men'?s|male)\b/i.test(value)) return "men";
+  const normalized = value.toLowerCase().replace(/[’‘]/g, "'");
+  if (/\b(?:women'?s?|women\s+s|woman|female)\b/i.test(normalized)) return "women";
+  if (/\b(?:men'?s?|men\s+s|man|male)\b/i.test(normalized)) return "men";
   if (/\bunisex\b/i.test(value)) return "unisex";
   return null;
 }

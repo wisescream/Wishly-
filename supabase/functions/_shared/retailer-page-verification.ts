@@ -4,6 +4,7 @@ import type { DnsResolver } from "./url-security.ts";
 import { getTitleCoverage } from "./title-match.ts";
 import { compareProductConditions, normalizeProductCondition } from "./product-condition.ts";
 import { getRetailerDomain, retailerPageRobotsAllowed } from "./retailer-discovery.ts";
+import { confirmsGenderVariant, getGenderVariant } from "./gender-variant.ts";
 
 export interface RetailerPageSeed {
   itemId: string;
@@ -70,16 +71,91 @@ function normalize(value: string | null | undefined): string {
   return String(value || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function withoutBrand(value: string | null | undefined, brand: string | null | undefined): string {
+  const normalized = normalize(value);
+  const normalizedBrand = normalize(brand);
+  if (!normalizedBrand) return normalized;
+  const brandPattern = normalizedBrand.replace(/\s+/g, "\\s+");
+  return normalized.replace(new RegExp(`(^| )${brandPattern}($| )`, "g"), " ").replace(/\s+/g, " ").trim();
+}
+
 function hasExactModel(model: string, text: string): boolean {
   const escaped = model.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|\\W)${escaped}($|\\W)`, "i").test(text);
 }
 
-function matchesRequestedVariant(target: string | null, metadata: ReturnType<typeof parseProductMetadata>): boolean {
-  const requested = String(target || "").trim();
-  if (!requested) return true;
+const variantColors = [
+  "natural titanium", "desert titanium", "space gray", "space grey", "rose gold", "starlight", "midnight",
+  "burgundy", "purple", "orange", "yellow", "green", "silver", "white", "black", "graphite",
+  "beige", "brown", "grey", "gray", "olive", "cream", "navy", "blue", "red", "pink", "gold", "tan", "teal",
+];
+
+function findColor(value: string): string | null {
+  const lower = normalize(value);
+  return variantColors.find((color) => new RegExp(`(^| )${color.replace(/\s+/g, " ")}($| )`).test(lower)) || null;
+}
+
+export function findProductVariantColor(value: string, brand?: string | null): string | null {
+  return findColor(withoutBrand(value, brand));
+}
+
+function findCapacity(value: string): string | null {
+  return value.match(/\b(\d+(?:\.\d+)?)\s*(MB|GB|TB)\b/i)?.slice(1).join("").toUpperCase() || null;
+}
+
+function findSize(value: string): { label: string; system: string | null } | null {
+  const match = value.match(/\b(US\s*(?:men'?s|women'?s)|EU|UK|CM|MM)\s*[:#-]?\s*(XXS|XS|S|M|L|XL|XXL|\d{1,3}(?:\.\d)?)\b/i)
+    || value.match(/\b(?:shoe\s+)?size\s*[:#-]?\s*(XXS|XS|S|M|L|XL|XXL|\d{1,3}(?:\.\d)?)\b/i)
+    || value.trim().match(/^(XXS|XS|S|M|L|XL|XXL|\d{1,3}(?:\.\d)?)$/i);
+  if (!match) return null;
+  const hasSystem = /^(US|EU|UK|CM|MM)/i.test(match[0]);
+  const system = hasSystem ? match[1].match(/^(US|EU|UK|CM|MM)/i)?.[1].toUpperCase() || null : null;
+  return { label: (hasSystem ? match[2] : match[1]).toUpperCase(), system };
+}
+
+function removeStructuredVariantTokens(value: string): string {
+  const color = findColor(value);
+  let remaining = normalize(value);
+  if (color) remaining = remaining.replace(new RegExp(`(^| )${color}($| )`), " ");
+  remaining = remaining
+    .replace(/\b\d+(?:\.\d+)?\s*(?:mb|gb|tb)\b/g, " ")
+    .replace(/\b(?:us|eu|uk|cm|mm)\b/g, " ")
+    .replace(/\b(?:xxs|xs|s|m|l|xl|xxl|\d{1,3}(?:\.\d)?)\b/g, " ")
+    .replace(/\b(?:women|woman|men|man|female|male|unisex)\b/g, " ");
+  return remaining.replace(/\s+/g, " ").trim();
+}
+
+function matchesRequestedVariant(seed: RetailerPageSeed, metadata: ReturnType<typeof parseProductMetadata>): boolean {
+  const requested = String(seed.variantLabel || "").trim();
   const variantFields = [metadata.variant_name, metadata.variant_details.color, metadata.variant_details.size, metadata.variant_details.capacity, metadata.variant_details.sku].filter(Boolean).join(" ");
-  const evidence = [variantFields, metadata.title].filter(Boolean).join(" ");
+  const targetTitle = withoutBrand(seed.title, seed.brand);
+  const candidateTitle = withoutBrand(metadata.title, metadata.brand);
+  const evidence = [variantFields, candidateTitle, metadata.description].filter(Boolean).join(" ");
+  const targetEvidence = [targetTitle, requested].filter(Boolean).join(" ");
+
+  const targetColor = findColor(requested) || findColor(targetTitle);
+  const candidateColor = findColor(metadata.variant_details.color || "")
+    || findColor(metadata.variant_name || "")
+    || findColor(candidateTitle);
+  if (targetColor && candidateColor !== targetColor) return false;
+  const targetCapacity = findCapacity(requested) || findCapacity(targetTitle);
+  const candidateCapacity = findCapacity(metadata.variant_details.capacity || "")
+    || findCapacity(metadata.variant_name || "")
+    || findCapacity(candidateTitle);
+  if (targetCapacity && candidateCapacity !== targetCapacity) return false;
+  const targetGender = getGenderVariant(targetEvidence);
+  const candidateGender = getGenderVariant([variantFields, candidateTitle].join(" "));
+  if (!confirmsGenderVariant(targetGender, candidateGender)) return false;
+  const targetSize = findSize(requested) || findSize(targetTitle);
+  if (targetSize) {
+    const candidateSize = findSize(metadata.variant_details.size || "")
+      || findSize(metadata.variant_name || "")
+      || findSize(candidateTitle);
+    if (!candidateSize || targetSize.label !== candidateSize.label || (targetSize.system && targetSize.system !== candidateSize.system)) return false;
+  }
+
+  if (!requested) return true;
+  if (!removeStructuredVariantTokens(requested)) return true;
   const requestedNormalized = normalize(requested);
   const evidenceNormalized = normalize(evidence);
   if (requestedNormalized && evidenceNormalized.includes(requestedNormalized)) return true;
@@ -111,7 +187,7 @@ function assessRetailerPageIdentity(seed: RetailerPageSeed, metadata: ReturnType
 
   const titleCoverage = getTitleCoverage(seed.title, titleAndModel);
   if (!gtinMatch && !(modelMatch && brandMatch) && titleCoverage < 0.8) return null;
-  if (!matchesRequestedVariant(seed.variantLabel, metadata)) return null;
+  if (!matchesRequestedVariant(seed, metadata)) return null;
 
   if (gtinMatch) return conditionMatch === "unconfirmed"
     ? { confidence: 0.84, matchType: "retailer_page_verified_gtin_condition_unconfirmed" }

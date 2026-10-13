@@ -9,7 +9,6 @@ import {
   MOROCCAN_RETAILERS,
 } from "@/lib/retailers";
 import { MoroccanRetailersProvider } from "@/lib/providers/MoroccanRetailersProvider";
-import { discoverOffersForProduct } from "@/lib/providers";
 
 describe("Product Import & URL Parsing", () => {
   it("correctly identifies Moroccan stores and infers MAD currency", () => {
@@ -117,28 +116,13 @@ describe("Moroccan Retailers Registry & Category Inference", () => {
 });
 
 describe("MoroccanRetailersProvider", () => {
-  it("provides MAD offers for products", async () => {
-    const offers = await MoroccanRetailersProvider.findOffersForProduct({
-      title: "PlayStation 5 Digital Edition",
-      brand: "Sony",
-      model_number: "CFI-1200",
-    });
-
-    expect(offers.length).toBeGreaterThan(0);
-    for (const offer of offers) {
-      expect(offer.currency).toBe("MAD");
-      expect(offer.source).toBe("moroccan_retailer");
-      expect(offer.url).toMatch(/^https?:\/\//);
-      expect(offer.delivery_estimate).toBe("Livraison au Maroc");
-    }
-  });
-
   it("searches Moroccan stores with a live query", async () => {
     const candidates = await MoroccanRetailersProvider.searchByQuery("AirPods Pro 2");
     expect(candidates.length).toBeGreaterThan(0);
 
     const first = candidates[0];
     expect(first.currency).toBe("MAD");
+    expect(first.price).toBeNull();
     expect(first.url).toBeTruthy();
     expect(first.match_reason).toContain("Live search on");
   });
@@ -149,20 +133,5 @@ describe("MoroccanRetailersProvider", () => {
     expect(result?.gtin).toBe("195949038234");
     expect(result?.currency).toBe("MAD");
     expect(result?.store).toBe("Jumia Maroc");
-  });
-});
-
-describe("discoverOffersForProduct", () => {
-  it("aggregates Moroccan retailers when discovering offers", async () => {
-    const offers = await discoverOffersForProduct({
-      title: "Sony WH-1000XM5",
-      brand: "Sony",
-      model_number: "WH-1000XM5",
-    });
-
-    expect(offers.length).toBeGreaterThan(0);
-    const moroccanOffers = offers.filter((o) => o.source === "moroccan_retailer");
-    expect(moroccanOffers.length).toBeGreaterThan(0);
-    expect(moroccanOffers.some((o) => o.currency === "MAD")).toBe(true);
   });
 });

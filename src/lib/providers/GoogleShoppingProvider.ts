@@ -1,5 +1,5 @@
 import type { ProviderAdapter } from "./types";
-import type { ProductCandidate, FetchedOffer } from "@/types/database";
+import type { ProductCandidate } from "@/types/database";
 
 export const GoogleShoppingProvider: ProviderAdapter = {
   id: "google_shopping",
@@ -20,15 +20,4 @@ export const GoogleShoppingProvider: ProviderAdapter = {
     return null;
   },
 
-  async findOffersForProduct(product): Promise<FetchedOffer[]> {
-    const query = [product.brand, product.model_number || product.title]
-      .filter(Boolean)
-      .join(" ");
-
-    const { data, error } = await (await import("@/lib/supabase")).supabase.functions.invoke("search-products", {
-      body: { query, mode: "offers", product },
-    });
-    if (error || !Array.isArray(data?.offers)) return [];
-    return data.offers as FetchedOffer[];
-  },
 };

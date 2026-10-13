@@ -11,18 +11,18 @@ import { classifySerpApiFailure, parseSerpApiShoppingResponse } from "../_shared
 import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
 import { buildProductSearchQueries } from "../_shared/product-search.ts";
 import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/research-persistence.ts";
-import { inspectAndVerifyRetailerProductPage } from "../_shared/retailer-page-verification.ts";
+import { findProductVariantColor, inspectAndVerifyRetailerProductPage } from "../_shared/retailer-page-verification.ts";
 import { classifySeller, getRetailerDomain, inferRetailerCountry } from "../_shared/retailer-discovery.ts";
 import { inspectRetailerCatalog } from "../_shared/retailer-catalog-inspection.ts";
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
+import { buildRetailerQueries, parseTavilyResponse, searchTavily } from "../_shared/tavily.ts";
 
 const corsHeaders = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-price-check-secret" };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 const digits = (value: unknown) => String(value || "").replace(/\D/g, "");
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const capacity = (value: string) => value.match(/\b\d+\s*(?:gb|tb|mb)\b/i)?.[0].replace(/\s/g, "").toLowerCase() || null;
-const color = (value: string) => value.match(/\b(?:black|white|silver|gold|blue|red|green|yellow|purple|pink|midnight|starlight|graphite|natural titanium|desert titanium)\b/i)?.[0].toLowerCase() || null;
 const sizeVariant = (value: unknown) => {
   const text = String(value || "");
   const match = text.match(/\b(US\s*(?:men'?s|women'?s)|EU|UK|CM|MM)\s*[:#-]?\s*(XXS|XS|S|M|L|XL|XXL|\d{1,3}(?:\.\d)?)\b/i)
@@ -49,13 +49,15 @@ serve(async (req) => {
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     const apiKey = Deno.env.get("SERPAPI_KEY");
     const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
+    const tavilyKey = Deno.env.get("TAVILY_API_KEY");
+    const tavilyEnabled = Boolean(tavilyKey) && Deno.env.get("TAVILY_ALLOW_PAID_SEARCH") === "true";
     if (!url || !serviceKey) return json({ error: "Service is not configured." }, 503);
     const admin = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
     const token = req.headers.get("x-price-check-secret");
     if (!token || token.length > 256) return json({ error: "Unauthorized scheduled invocation." }, 401);
     const { data: authorized, error: authError } = await admin.rpc("is_valid_price_check_secret", { p_candidate: token });
     if (authError || authorized !== true) return json({ error: "Unauthorized scheduled invocation." }, 401);
-    if (!apiKey && !openRouterKey) {
+    if (!apiKey && !openRouterKey && !tavilyEnabled) {
       const retryAt = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
       await admin.from("items").update({
         next_offer_search_at: retryAt,
@@ -78,6 +80,13 @@ serve(async (req) => {
       .order("created_at", { ascending: true })
       .limit(24);
     if (error) throw error;
+    const dueItemIds = (due || []).map((item) => item.id);
+    if (dueItemIds.length) {
+      const { error: statusError } = await admin.from("items")
+        .update({ enrichment_status: "searching_offers", enrichment_error: null })
+        .in("id", dueItemIds).eq("status", "wanted");
+      if (statusError) console.error(JSON.stringify({ event: "research_status_update_failed", item_count: dueItemIds.length }));
+    }
     const preferenceByWishlist = new Map<string, { currency: string | null; country: string | null; language: string | null }>();
     const wishlistIds = [...new Set((due || []).map((item) => item.wishlist_id))];
     if (wishlistIds.length) {
@@ -96,8 +105,28 @@ serve(async (req) => {
     }
     let searched = 0;
     let webSearches = 0;
+    let tavilySearches = 0;
     let providerFailures = 0;
     let offersSaved = 0;
+    let shoppingRowsReceived = 0;
+    let shoppingCandidateEvaluations = 0;
+    let shoppingCandidatesAccepted = 0;
+    const shoppingCandidateRejections = {
+      identity: 0,
+      conflicting_identifier: 0,
+      replacement_or_accessory: 0,
+      capacity_unconfirmed: 0,
+      capacity_mismatch: 0,
+      color_unconfirmed: 0,
+      color_mismatch: 0,
+      gender_unconfirmed: 0,
+      gender_mismatch: 0,
+      size_unconfirmed: 0,
+      size_mismatch: 0,
+      invalid_price_or_url: 0,
+      currency: 0,
+    };
+    const shoppingConditionComparisons = { exact: 0, alternative: 0, unconfirmed: 0 };
     let retailerPagesVerified = 0;
     let dailyBudgetReached = false;
     let skipped = 0;
@@ -213,7 +242,8 @@ serve(async (req) => {
         if (compareProductConditions(item.condition, providerCondition(row.condition, title)) !== "exact") return false;
         const target = `${item.title} ${item.variant_label || ""}`;
         if (capacity(target) && capacity(title) !== capacity(target)) return false;
-        if (color(target) && color(title) !== color(target)) return false;
+        const targetColor = findProductVariantColor(target, item.brand);
+        if (targetColor && findProductVariantColor(title, item.brand) !== targetColor) return false;
         const targetGender = getGenderVariant(target);
         const foundGender = getGenderVariant(title);
         if (!confirmsGenderVariant(targetGender, foundGender)) return false;
@@ -227,6 +257,8 @@ serve(async (req) => {
       }));
 
       let citations: ReturnType<typeof extractRetailerCitations> = [];
+      let citationProvider: "openrouter_web_search" | "tavily_web_search" = "openrouter_web_search";
+      let citationQueryHash: string | null = null;
       let webSearchError: string | null = null;
       if (!hasStrongShoppingMatch && openRouterKey && Deno.env.get("OPENROUTER_ALLOW_SCHEDULED_SEARCH") === "true") {
         const openRouterLimit = Deno.env.get("OPENROUTER_DAILY_REQUEST_LIMIT") || Deno.env.get("OPENROUTER_DAILY_SEARCH_LIMIT") || "8";
@@ -289,6 +321,81 @@ serve(async (req) => {
         }
       }
 
+      // Tavily is the paid-search fallback when Shopping and optional OpenRouter
+      // discovery do not produce retailer citations. It is disabled unless both
+      // a server-side key and explicit project opt-in are present.
+      if (!hasStrongShoppingMatch && citations.length === 0 && tavilyEnabled) {
+        const tavilyQuery = buildRetailerQueries({
+          title: seed.title, brand: seed.brand, model: seed.model_number,
+          gtin: seed.gtin, variant: seed.variant_label, category: seed.category,
+          country: targetCountry, language: seedPreference?.language,
+        })[0];
+        if (tavilyQuery) {
+          const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(tavilyQuery.toLowerCase().replace(/\s+/g, " ").trim()));
+          const queryHash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+          citationQueryHash = queryHash;
+          const checkedAt = new Date().toISOString();
+          const { data: cached } = await admin.from("retailer_search_cache").select("results")
+            .eq("query_hash", queryHash).eq("provider", "tavily").gt("expires_at", checkedAt).maybeSingle();
+          if (Array.isArray(cached?.results)) {
+            const parsed = parseTavilyResponse({ results: cached.results });
+            citations = extractRetailerCitations(parsed.results.map((result) => ({
+              type: "url_citation", url_citation: { url: result.url, title: result.title, content: result.content },
+            })));
+            citationProvider = "tavily_web_search";
+          } else {
+            const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("TAVILY_DAILY_SEARCH_LIMIT") || "4", 10) || 4));
+            const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "tavily", p_daily_limit: dailyLimit });
+            if (budgetError) throw budgetError;
+            if (reserved !== true) {
+              searchBudgetReached = true;
+              dailyBudgetReached = true;
+              webSearchError = "Wishly reached its configured daily Tavily search budget. Research will retry tomorrow.";
+              await recordProviderMetric(admin, { provider: "tavily", surface: "scheduled", outcome: "budget_exhausted", marketCountry: targetCountry });
+            } else {
+              tavilySearches++;
+              let outcome: "success" | "error" = "error";
+              let statusCode: number | null = null;
+              let resultCount = 0;
+              const searchStartedAt = Date.now();
+              try {
+                const result = await searchTavily(tavilyKey!, tavilyQuery);
+                statusCode = result.response.status;
+                if (!result.response.ok) {
+                  failedSearches++;
+                  providerFailures++;
+                  webSearchError = result.response.status === 401 ? "Tavily rejected its API key; check TAVILY_API_KEY." : result.response.status === 429 ? "Tavily rate limit reached." : "Tavily web search is temporarily unavailable.";
+                } else {
+                  const retailerResults = result.data.results.filter((entry) => {
+                    try { return ["http:", "https:"].includes(new URL(entry.url).protocol); } catch { return false; }
+                  });
+                  resultCount = retailerResults.length;
+                  citations = extractRetailerCitations(retailerResults.map((entry) => ({
+                    type: "url_citation", url_citation: { url: entry.url, title: entry.title, content: entry.content },
+                  })));
+                  citationProvider = "tavily_web_search";
+                  outcome = "success";
+                  await admin.from("retailer_search_cache").upsert({
+                    query_hash: queryHash, provider: "tavily", results: retailerResults,
+                    expires_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+                  }, { onConflict: "query_hash" });
+                }
+              } catch {
+                failedSearches++;
+                providerFailures++;
+                webSearchError = "Tavily web search could not be reached.";
+              } finally {
+                await recordProviderMetric(admin, {
+                  provider: "tavily", surface: "scheduled", outcome, durationMs: Date.now() - searchStartedAt,
+                  resultCount, searchCount: 1, statusCode,
+                  unitCostUsd: parseEstimatedUnitCost(Deno.env.get("TAVILY_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry,
+                });
+              }
+            }
+          }
+        }
+      }
+
       if (shoppingRows.length === 0 && citations.length === 0 && failedSearches > 0) {
         for (const item of items) {
           const attempts = Number(item.offer_search_attempts || 0) + 1;
@@ -303,33 +410,43 @@ serve(async (req) => {
         }
         continue;
       }
+      shoppingRowsReceived += shoppingRows.length;
       for (const item of items) {
         const identity = digits(item.gtin);
         const model = String(item.model_number || "").trim();
         const title = `${item.title} ${item.variant_label || ""}`.trim();
         const targetCapacity = capacity(title);
-        const targetColor = color(title);
+        const targetColor = findProductVariantColor(title, item.brand);
         const targetSize = sizeVariant(item.variant_label);
         const targetGender = getGenderVariant(title);
         const matches = [...new Map(shoppingRows.flatMap((row: any) => {
+          shoppingCandidateEvaluations++;
+          const reject = (reason: keyof typeof shoppingCandidateRejections) => {
+            shoppingCandidateRejections[reason]++;
+            return [];
+          };
           const candidateTitle = String(row.title || "");
-          const candidateColor = color(candidateTitle);
+          const candidateColor = findProductVariantColor(candidateTitle, item.brand);
           const candidateLower = candidateTitle.toLowerCase();
           const candidateIds = [row.gtin, row.upc, row.ean].map(digits).filter(Boolean);
           const gtinMatch = Boolean(identity && candidateIds.includes(identity));
           const modelMatch = Boolean(model && new RegExp(`(^|\\W)${escapeRegex(model)}($|\\W)`, "i").test(candidateTitle));
           const titleCoverage = getTitleCoverage(item.title, candidateTitle);
           const titleMatch = titleCoverage >= 0.75 && (!item.brand || candidateLower.includes(String(item.brand).toLowerCase()));
-          if (!gtinMatch && !(modelMatch && (!item.brand || candidateLower.includes(String(item.brand).toLowerCase()))) && !titleMatch) return [];
-          if (identity && candidateIds.length && !gtinMatch) return [];
-          if (/\b(replacement|compatible|case for|cover for)\b/i.test(candidateTitle)) return [];
-          if (targetCapacity && capacity(candidateTitle) !== targetCapacity) return [];
-          if (targetColor && color(candidateTitle) !== targetColor) return [];
+          if (identity && candidateIds.length && !gtinMatch) return reject("conflicting_identifier");
+          if (!gtinMatch && !(modelMatch && (!item.brand || candidateLower.includes(String(item.brand).toLowerCase()))) && !titleMatch) return reject("identity");
+          if (/\b(replacement|compatible|case for|cover for)\b/i.test(candidateTitle)) return reject("replacement_or_accessory");
+          const candidateCapacity = capacity(candidateTitle);
+          if (targetCapacity && !candidateCapacity) return reject("capacity_unconfirmed");
+          if (targetCapacity && candidateCapacity !== targetCapacity) return reject("capacity_mismatch");
+          if (targetColor && !candidateColor) return reject("color_unconfirmed");
+          if (targetColor && candidateColor !== targetColor) return reject("color_mismatch");
           const rowSizeText = String(row.size || row.extensions?.find?.((value: unknown) => typeof value === "string" && /\b(?:size|shoe\s+size|EU|UK|US|CM|MM)\b/i.test(value)) || "");
           const candidateSize = sizeVariant(rowSizeText) || sizeVariant(candidateTitle);
           const candidateGender = getGenderVariant(candidateTitle);
-          if (!confirmsGenderVariant(targetGender, candidateGender)) return [];
-          if (targetSize && (!candidateSize || targetSize.label !== candidateSize.label || (targetSize.system && candidateSize.system && targetSize.system !== candidateSize.system))) return [];
+          if (!confirmsGenderVariant(targetGender, candidateGender)) return reject(candidateGender ? "gender_mismatch" : "gender_unconfirmed");
+          if (targetSize && !candidateSize) return reject("size_unconfirmed");
+          if (targetSize && (targetSize.label !== candidateSize!.label || (targetSize.system && candidateSize!.system && targetSize.system !== candidateSize!.system))) return reject("size_mismatch");
           const candidateCondition = providerCondition(row.condition, candidateTitle);
           const conditionMatch = compareProductConditions(item.condition, candidateCondition);
           const price = Number(row.extracted_price);
@@ -340,15 +457,16 @@ serve(async (req) => {
             : oldPriceText.replace(/,(?=\d{1,2}$)/, ".").replace(/,/g, "");
           const originalPrice = Number(oldPriceNormalized);
           const offerUrl = typeof row.link === "string" ? row.link : "";
-          if (!Number.isFinite(price) || price <= 0 || !/^https?:\/\//i.test(offerUrl)) return [];
+          if (!Number.isFinite(price) || price <= 0 || !/^https?:\/\//i.test(offerUrl)) return reject("invalid_price_or_url");
           const rowPrice = String(row.price || "");
           const currency = resolveProviderCurrency(rowPrice, market.currency);
-          if (!currency) return [];
+          if (!currency) return reject("currency");
           const delivery = parseShippingEstimate(row.delivery, currency);
           const taxesKnown = false;
           const taxes = 0;
           const totalPrice = calculateTotalPurchaseCost({ price, shippingCost: delivery.amount, taxes, shippingKnown: delivery.known, taxesKnown });
           const condition = candidateCondition;
+          shoppingConditionComparisons[conditionMatch]++;
           const identityConfidence = gtinMatch ? 1 : modelMatch ? 0.9 : Math.min(0.84, 0.62 + titleCoverage * 0.22);
           const conditionConfidence = conditionMatch === "alternative" ? Math.min(0.72, identityConfidence) : conditionMatch === "unconfirmed" ? Math.min(0.84, identityConfidence) : identityConfidence;
           const sizeInfo = candidateSize;
@@ -368,6 +486,7 @@ serve(async (req) => {
             condition, availability: "unknown", source: "google_shopping", last_verified_at: checkedAt,
           }];
         }).map((offer: any) => [`${offer.source}:${offer.url}`, offer])).values()].sort((a: any, b: any) => b.product_match_confidence - a.product_match_confidence).slice(0, 8);
+        shoppingCandidatesAccepted += matches.length;
 
         const webMatches = citations.flatMap((citation) => {
           const evidence = `${citation.title} ${citation.content}`;
@@ -380,7 +499,7 @@ serve(async (req) => {
           const titleCoverage = getTitleCoverage(item.title, citation.title);
           if (!brandMatch || (!gtinMatch && !modelMatch && titleCoverage < 0.75)) return [];
           const candidateCapacity = capacity(evidence);
-          const candidateColor = color(evidence);
+          const candidateColor = findProductVariantColor(evidence, item.brand);
           if (targetCapacity && candidateCapacity && targetCapacity !== candidateCapacity) return [];
           if (targetColor && candidateColor && targetColor !== candidateColor) return [];
           const candidateGender = getGenderVariant(evidence);
@@ -411,7 +530,7 @@ serve(async (req) => {
             price: parsedPrice.amount, currency: parsedPrice.currency, url: citation.url,
             original_price: null, discount_percent: null, shipping_cost: 0, taxes: 0, total_price: null,
             shipping_known: false, taxes_known: false, total_is_estimated: true,
-            condition: candidateCondition, availability: "unknown", source: "openrouter_web_search", last_verified_at: checkedAt,
+            condition: candidateCondition, availability: "unknown", source: citationProvider, last_verified_at: checkedAt,
           }];
         });
         const allMatches = [...new Map([...matches, ...webMatches].map((offer: any) => [`${offer.source}:${offer.url}`, offer])).values()].sort((a: any, b: any) => b.product_match_confidence - a.product_match_confidence).slice(0, 8);
@@ -423,6 +542,7 @@ serve(async (req) => {
         };
         const queryDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([...new Set(queries)].join("|").toLowerCase().replace(/\s+/g, " ").trim()));
         const queryHash = Array.from(new Uint8Array(queryDigest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const discoveryQueryHash = citationQueryHash || queryHash;
         const preference = preferenceByWishlist.get(item.wishlist_id);
         for (const candidate of allMatches.slice(0, 2)) {
           try {
@@ -438,8 +558,8 @@ serve(async (req) => {
                 name: candidate.store || domain, domain, canonical_domain: domain, country_code: countryCode,
                 validation_status: "pending_inspection", seller_type: classifySeller(domain),
                 categories: [item.category || "fashion"], languages: preference?.language ? [preference.language] : [],
-                discovery_source: candidate.source === "openrouter_web_search" ? "openrouter" : "serpapi",
-                discovered_by_query: queryHash, is_supported: false,
+                discovery_source: candidate.source === "tavily_web_search" ? "tavily" : candidate.source === "openrouter_web_search" ? "openrouter" : "serpapi",
+                discovered_by_query: discoveryQueryHash, is_supported: false,
               }).select("id,name,seller_type,is_supported,validation_status,reliability_score,last_successful_at").maybeSingle();
               retailer = created || null;
               if (!retailer && createError?.code === "23505") {
@@ -449,10 +569,10 @@ serve(async (req) => {
                 retailer = raced || null;
               }
             }
-            const sourceProvider = candidate.source === "openrouter_web_search" ? "openrouter" : "serpapi";
+            const sourceProvider = candidate.source === "tavily_web_search" ? "tavily" : candidate.source === "openrouter_web_search" ? "openrouter" : "serpapi";
             await admin.from("retailer_discovery_events").insert({
               retailer_id: retailer?.id || null, canonical_domain: domain, product_id: item.product_id || null,
-              source_provider: sourceProvider, source_query: queryHash, source_url: candidate.url,
+              source_provider: sourceProvider, source_query: discoveryQueryHash, source_url: candidate.url,
               outcome: "discovered", evidence: { result_title: candidate.listing_title, source: candidate.source, match_confidence: candidate.product_match_confidence },
             });
             const attempt = await inspectAndVerifyRetailerProductPage(candidate.url, {
@@ -485,7 +605,7 @@ serve(async (req) => {
             const outcome = attempt.offer ? "inspection_succeeded" : errorCode === "robots_restricted" ? "restricted" : "inspection_failed";
             await admin.from("retailer_discovery_events").insert({
               retailer_id: retailer?.id || null, canonical_domain: domain, product_id: item.product_id || null,
-              source_provider: sourceProvider, source_query: queryHash, source_url: attempt.finalUrl,
+              source_provider: sourceProvider, source_query: discoveryQueryHash, source_url: attempt.finalUrl,
               outcome, error_code: errorCode,
               evidence: { ...attempt.evidence, status: attempt.status, ...(attempt.offer ? { match_type: attempt.offer.match_type, match_confidence: attempt.offer.product_match_confidence } : {}) },
             });
@@ -527,7 +647,7 @@ serve(async (req) => {
                 name: verified.store || domain, domain, canonical_domain: domain, country_code: countryCode,
                 validation_status: "validated", seller_type: sellerType, categories: [item.category || "fashion"],
                 languages: preference?.language ? [preference.language] : [], discovery_source: "serpapi",
-                discovered_by_query: queryHash, trust_evidence: "Public product page confirmed product identity, a current price, and currency; this does not establish seller authorization or authenticity.",
+                discovered_by_query: discoveryQueryHash, trust_evidence: "Public product page confirmed product identity, a current price, and currency; this does not establish seller authorization or authenticity.",
                 extraction_capabilities: { title: true, image: Boolean(verified.image_url), price: true, currency: true },
                 first_discovered_at: observedAt, last_inspected_at: observedAt, last_successful_at: observedAt,
                 reliability_score: 0.75, is_supported: true,
@@ -675,8 +795,8 @@ serve(async (req) => {
     }
 
     const durationMs = Date.now() - startedAt;
-    console.info(JSON.stringify({ event: "wishly_scheduled_research", providers: [apiKey ? "serpapi_google_shopping" : null, openRouterKey ? "openrouter_web_search" : null].filter(Boolean), provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, due_items: due?.length || 0, skipped_without_identity: skipped, duration_ms: durationMs }));
-    return json({ success: true, due_items: due?.length || 0, provider_searches: searched + webSearches, shopping_searches: searched, web_searches: webSearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, skipped_without_identity: skipped, duration_ms: durationMs });
+    console.info(JSON.stringify({ event: "wishly_scheduled_research", providers: [apiKey ? "serpapi_google_shopping" : null, openRouterKey ? "openrouter_web_search" : null, tavilyEnabled ? "tavily_web_search" : null].filter(Boolean), provider_searches: searched + webSearches + tavilySearches, shopping_searches: searched, shopping_rows_received: shoppingRowsReceived, shopping_candidate_evaluations: shoppingCandidateEvaluations, shopping_candidates_accepted: shoppingCandidatesAccepted, shopping_candidate_rejections: shoppingCandidateRejections, shopping_condition_comparisons: shoppingConditionComparisons, web_searches: webSearches + tavilySearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, due_items: due?.length || 0, skipped_without_identity: skipped, duration_ms: durationMs }));
+    return json({ success: true, due_items: due?.length || 0, provider_searches: searched + webSearches + tavilySearches, shopping_searches: searched, shopping_rows_received: shoppingRowsReceived, shopping_candidate_evaluations: shoppingCandidateEvaluations, shopping_candidates_accepted: shoppingCandidatesAccepted, shopping_candidate_rejections: shoppingCandidateRejections, shopping_condition_comparisons: shoppingConditionComparisons, web_searches: webSearches + tavilySearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, skipped_without_identity: skipped, duration_ms: durationMs });
   } catch {
     return json({ error: "Scheduled offer refresh failed; existing offer records were retained." }, 500);
   }

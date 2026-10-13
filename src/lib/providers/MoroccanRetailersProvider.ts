@@ -1,5 +1,5 @@
 import type { ProviderAdapter } from "./types";
-import type { ProductCandidate, FetchedOffer } from "@/types/database";
+import type { ProductCandidate } from "@/types/database";
 import { getRelevantMoroccanRetailers } from "@/lib/retailers";
 
 export const MoroccanRetailersProvider: ProviderAdapter = {
@@ -53,26 +53,4 @@ export const MoroccanRetailersProvider: ProviderAdapter = {
     };
   },
 
-  async findOffersForProduct(product): Promise<FetchedOffer[]> {
-    const query = [product.brand, product.model_number || product.title]
-      .filter(Boolean)
-      .join(" ")
-      .trim();
-
-    if (!query) return [];
-
-    const retailers = getRelevantMoroccanRetailers(query || product.title);
-
-    return retailers.map((r): FetchedOffer => ({
-      store: r.name,
-      price: 0, // Direct search link, price will be updated upon visiting or price checker
-      currency: "MAD",
-      url: r.buildSearchUrl(query || product.title),
-      condition: "new",
-      availability: "in_stock",
-      delivery_estimate: "Livraison au Maroc",
-      source: "moroccan_retailer",
-      last_verified_at: new Date().toISOString(),
-    }));
-  },
 };

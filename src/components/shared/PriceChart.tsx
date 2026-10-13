@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import type { PricePoint } from '@/types/database';
 import { type Currency, formatPrice } from '@/lib/currency';
-import { getPriceHistoryXPosition, groupPriceHistoryByListing, summarizePriceHistory } from '@/lib/priceHistory';
+import { getPriceHistoryXPosition, groupPriceHistoryByListing, resolvePriceHistoryCurrency, summarizePriceHistory } from '@/lib/priceHistory';
 
 const ranges = [
   { label: '7D', days: 7 },
@@ -24,7 +24,9 @@ export function PriceChart({ pricePoints, currency = 'MAD', className }: PriceCh
   const activeSeries = series.find(({ key }) => key === selectedSeries) || series[0];
   const now = Date.now();
   const periodStart = now - days * 24 * 60 * 60 * 1000;
-  const summary = useMemo(() => summarizePriceHistory(activeSeries?.points || [], currency, days, now), [activeSeries, currency, days, now]);
+  const historyCurrency = resolvePriceHistoryCurrency(activeSeries?.points || [], currency, days, now);
+  const usingListingCurrency = historyCurrency !== currency.toUpperCase();
+  const summary = useMemo(() => summarizePriceHistory(activeSeries?.points || [], historyCurrency, days, now), [activeSeries, historyCurrency, days, now]);
   const { points: history, current, previous, lowest: minPrice, highest: maxPrice, percentChange: change } = summary;
 
   const width = 300;
@@ -58,7 +60,7 @@ export function PriceChart({ pricePoints, currency = 'MAD', className }: PriceCh
           {series.length > 1 && <select aria-label="Price history listing" value={activeSeries?.key || ''} onChange={(event) => setSelectedSeries(event.target.value)} className="max-w-44 rounded-lg border border-border/50 bg-card px-2 py-1 text-[10px]">
             {series.map((value) => <option key={value.key} value={value.key}>{value.label}</option>)}
           </select>}
-          <span className="text-[10px] text-muted-foreground">{history.length} observation{history.length === 1 ? '' : 's'} · {currency}</span>
+          <span className="text-[10px] text-muted-foreground">{history.length} observation{history.length === 1 ? '' : 's'} · {historyCurrency}</span>
         </div>
       </div>
 
@@ -68,7 +70,7 @@ export function PriceChart({ pricePoints, currency = 'MAD', className }: PriceCh
         ].map(([label, value]) => (
           <div key={String(label)} className="rounded-xl border border-border/40 bg-card/40 p-2">
             <span className="block text-[10px] text-muted-foreground">{label}</span>
-            <strong className="text-xs">{typeof value === 'number' ? formatPrice(value, currency) : '—'}</strong>
+            <strong className="text-xs">{typeof value === 'number' ? formatPrice(value, historyCurrency) : '—'}</strong>
           </div>
         ))}
       </div>
@@ -77,6 +79,7 @@ export function PriceChart({ pricePoints, currency = 'MAD', className }: PriceCh
           {change == null ? 'Not enough observations' : `${change > 0 ? '+' : ''}${change.toFixed(1)}%`}
         </strong>
       </div>
+      {usingListingCurrency && <p className="text-[10px] text-muted-foreground">Showing this listing’s recorded currency; no currency conversion is applied.</p>}
 
       {history.length < 2 ? (
         <div className="flex min-h-36 flex-col items-center justify-center rounded-2xl border border-border/40 bg-card/40 px-4 text-center">
@@ -89,7 +92,7 @@ export function PriceChart({ pricePoints, currency = 'MAD', className }: PriceCh
             <defs><linearGradient id="wishly-price-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7c3aed" stopOpacity="0.35" /><stop offset="100%" stopColor="#7c3aed" stopOpacity="0" /></linearGradient></defs>
             <path d={areaD} fill="url(#wishly-price-gradient)" />
             <path d={pathD} fill="none" stroke="#a855f7" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-            {points.map(({ x, y, point }) => <circle key={point.id} cx={x} cy={y} r="3.5" fill={point.is_verified ? '#fff' : '#fbbf24'} stroke={point.is_verified ? '#a855f7' : '#d97706'} strokeWidth="2"><title>{formatPrice(Number(point.price), currency)} · {new Date(point.recorded_at).toLocaleString()} · {point.is_verified ? 'verified' : 'unverified observation'}</title></circle>)}
+            {points.map(({ x, y, point }) => <circle key={point.id} cx={x} cy={y} r="3.5" fill={point.is_verified ? '#fff' : '#fbbf24'} stroke={point.is_verified ? '#a855f7' : '#d97706'} strokeWidth="2"><title>{formatPrice(Number(point.price), historyCurrency)} · {new Date(point.recorded_at).toLocaleString()} · {point.is_verified ? 'verified' : 'unverified observation'}</title></circle>)}
           </svg>
           <div className="flex justify-between text-[10px] text-muted-foreground">
             <span>{new Date(periodStart).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>

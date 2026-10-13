@@ -55,6 +55,7 @@ describe("price alert observations", () => {
 
   it("labels web search snippet alerts honestly", () => {
     expect(getAlertSourceLabel("openrouter_web_search")).toBe("Web search snippet");
+    expect(getAlertSourceLabel("tavily_web_search")).toBe("Web search snippet");
     expect(getAlertSourceLabel("google_shopping")).toBe("Google Shopping");
   });
 });

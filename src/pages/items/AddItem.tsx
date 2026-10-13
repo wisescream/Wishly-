@@ -17,6 +17,7 @@ import { getWishlists } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 import { FashionImageSearchPanel } from '@/components/shared/FashionImageSearchPanel';
+import { ProductImageSearchPanel } from '@/components/shared/ProductImageSearchPanel';
 import { mergeFashionCandidateDetails } from '@/lib/fashionImage';
 import {
   importByNameSearch,
@@ -25,8 +26,7 @@ import {
   isValidGtin,
   saveImportedProductToWishlist,
 } from '@/lib/importService';
-import { discoverOffersForProduct } from '@/lib/providers';
-import type { FetchedProduct, ProductCandidate, FetchedOffer } from '@/types/database';
+import type { FetchedProduct, ProductCandidate } from '@/types/database';
 
 type ImportMode = 'url' | 'search' | 'image' | 'barcode' | 'manual';
 const modes: Array<{ id: ImportMode; label: string; icon: React.ElementType }> = [
@@ -80,7 +80,6 @@ export default function AddItem() {
   const [candidates, setCandidates] = useState<ProductCandidate[]>([]);
   const [busy, setBusy] = useState(false);
   const [scanActive, setScanActive] = useState(false);
-  const [discoveredOffers, setDiscoveredOffers] = useState<FetchedOffer[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const autoSearchRef = useRef<string | null>(null);
 
@@ -168,14 +167,8 @@ export default function AddItem() {
     }
     if (candidateCurrencySupported) setCurrency(candidateCurrency);
     setCandidates([]);
-    discoverOffersForProduct({
-      title: candidate.title,
-      brand: selectedFashionDetails.brand,
-      model_number: candidate.model_number,
-      gtin: candidate.gtin,
-    }).then((offers) => setDiscoveredOffers(offers)).catch(() => {});
     if (candidate.price && !candidateCurrencySupported) toast.info('Product selected. Its price has no supported currency, so the price was left blank.');
-    else toast.success('Product selected. Wishly discovered matching offers across Moroccan and global stores.');
+    else toast.success('Product selected. Save it to start retailer research.');
   };
 
   const selectImportedVariant = (selected: NonNullable<FetchedProduct['variants']>[number]) => {
@@ -197,7 +190,6 @@ export default function AddItem() {
   const handleUrlImport = async () => {
     setBusy(true);
     setCandidates([]);
-    setDiscoveredOffers([]);
     setTitle(''); setBrand(''); setModel(''); setGtin(''); setVariant(''); setVariantDetails({}); setAvailableVariants([]);
     setCondition('unknown');
     setImageUrl(''); setAdditionalImages([]); setDescription(''); setCategory('');
@@ -210,7 +202,6 @@ export default function AddItem() {
       setTitle(result.product.title);
       setPriceSource(result.product.price && result.product.price > 0 && pageCurrencySupported ? 'retailer_page' : 'user_entered');
       setCandidates(result.candidates);
-      setDiscoveredOffers(result.offers || []);
       setBrand(result.product.brand || '');
       setModel(result.product.model_number || '');
       setGtin(result.product.gtin || '');
@@ -296,7 +287,6 @@ export default function AddItem() {
         description: description || null, category: category || null,
         variantDetails,
         condition,
-        offers: discoveredOffers,
       });
       return saved;
     },
@@ -337,14 +327,17 @@ export default function AddItem() {
               <Button type="button" onClick={() => void handleSearch()} disabled={busy || !searchInput.trim()}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Search'}</Button></div>
           </section>}
 
-          {mode === 'image' && <FashionImageSearchPanel
-            onCandidates={setCandidates}
-            onSelectedItem={(selectedItem) => {
-              setCategory(selectedItem.category);
-              setBrand(selectedItem.brand);
-              setDescription(selectedItem.description);
-            }}
-          />}
+          {mode === 'image' && <>
+            <ProductImageSearchPanel onCandidates={setCandidates} />
+            <FashionImageSearchPanel
+              onCandidates={setCandidates}
+              onSelectedItem={(selectedItem) => {
+                setCategory(selectedItem.category);
+                setBrand(selectedItem.brand);
+                setDescription(selectedItem.description);
+              }}
+            />
+          </>}
 
           {mode === 'barcode' && <section className="p-4 rounded-2xl border border-border space-y-3">
             <h2 className="text-sm font-semibold">Find a product by barcode</h2>
@@ -428,33 +421,7 @@ export default function AddItem() {
                 <div className="space-y-1.5"><Label>Priority</Label><div className="grid grid-cols-3 gap-2">{PRIORITIES.map((item) => <button type="button" key={item.value} onClick={() => setPriority(item.value)} className={`p-2 rounded-xl border text-xs ${priority === item.value ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>{item.emoji} {item.label}</button>)}</div></div>
                 <div className="space-y-1.5"><Label>Notes and preferences</Label><Textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Size, color, condition, or other details" /></div>
 
-                {discoveredOffers.length > 0 && (
-                  <div className="space-y-2 rounded-xl border border-purple-500/30 bg-purple-500/5 p-3.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-foreground flex items-center gap-1.5">
-                        <span>⚡ Matching Store Offers ({discoveredOffers.length})</span>
-                      </span>
-                      <span className="text-[10px] text-muted-foreground font-medium">Moroccan 🇲🇦 & Global 🌐</span>
-                    </div>
-                    <div className="space-y-1.5 max-h-48 overflow-y-auto pt-1">
-                      {discoveredOffers.map((o, idx) => (
-                        <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-card/70 border border-border/40 text-xs">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="text-sm shrink-0">{o.store.includes('Maroc') || o.currency === 'MAD' ? '🇲🇦' : '🌐'}</span>
-                            <div className="min-w-0">
-                              <span className="font-semibold text-foreground block truncate">{o.store}</span>
-                              {o.delivery_estimate && <span className="block text-[10px] text-muted-foreground">{o.delivery_estimate}</span>}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            {o.price > 0 && <span className="font-bold text-emerald-400">{o.price} {o.currency}</span>}
-                            <a href={o.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline text-[11px] font-medium">View ↗</a>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <p className="text-xs text-muted-foreground">Wishly starts retailer research after you save this product. Search snippets are not saved as offers.</p>
 
                 <Button type="submit" disabled={createMutation.isPending || !wishlists.length} className="w-full h-11 rounded-xl">{createMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}Save to wishlist</Button>
                 {price && <p className="text-xs text-muted-foreground">This starting price is stored as an observation. Only fresh exact-match offers appear in retailer comparison.</p>}

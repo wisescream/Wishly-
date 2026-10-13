@@ -281,8 +281,10 @@ DROP POLICY IF EXISTS items_owner ON items;
 DROP POLICY IF EXISTS items_public_read ON items;
 DROP POLICY IF EXISTS items_friends_read ON items;
 DROP POLICY IF EXISTS price_points_read ON price_points;
+DROP POLICY IF EXISTS "price read" ON price_points;
 DROP POLICY IF EXISTS price_points_insert ON price_points;
 DROP POLICY IF EXISTS store_offers_read ON store_offers;
+DROP POLICY IF EXISTS "offers read" ON store_offers;
 DROP POLICY IF EXISTS reservations_own ON reservations;
 DROP POLICY IF EXISTS reservations_insert ON reservations;
 DROP POLICY IF EXISTS friendships_own ON friendships;
@@ -312,12 +314,16 @@ CREATE POLICY items_friends_read ON items FOR SELECT USING (
   wishlist_id IN (SELECT id FROM wishlists WHERE privacy = 'friends' AND owner_id IN (SELECT get_friend_ids(auth.uid())))
 );
 
-CREATE POLICY price_points_read ON price_points FOR SELECT USING (true);
+CREATE POLICY price_points_read ON price_points FOR SELECT USING (
+  item_id IN (SELECT id FROM items)
+);
 CREATE POLICY price_points_insert ON price_points FOR INSERT WITH CHECK (
   item_id IN (SELECT id FROM items WHERE wishlist_id IN (SELECT id FROM wishlists WHERE owner_id = auth.uid()))
 );
 
-CREATE POLICY store_offers_read ON store_offers FOR SELECT USING (true);
+CREATE POLICY store_offers_read ON store_offers FOR SELECT USING (
+  item_id IN (SELECT id FROM items)
+);
 
 CREATE POLICY reservations_own ON reservations FOR ALL USING (auth.uid() = reserver_id);
 CREATE POLICY reservations_insert ON reservations FOR INSERT WITH CHECK (auth.uid() = reserver_id);

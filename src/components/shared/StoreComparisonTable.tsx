@@ -172,7 +172,7 @@ export function StoreComparisonTable({
           return (
             <React.Fragment key={offer.id || offer.store}>
               {index === 0 && <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{exactMatch ? 'Likely exact product matches' : 'Possible matches and alternatives · confirm the product and variant'}</div>}
-              {index > 0 && exactMatch !== previousExactMatch && <div className="px-3 py-2 border-t border-border/50 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Possible matches and alternatives · confirm the product and variant</div>}
+              {index > 0 && exactMatch !== previousExactMatch && <div className="px-3 py-2 border-t border-border/50 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{exactMatch ? 'Likely exact product matches' : 'Possible matches and alternatives · confirm the product and variant'}</div>}
               <div className="flex items-center justify-between p-3 hover:bg-white/[0.02] transition-colors">
               <div className="flex items-center gap-3">
                 {offer.image_url ? <img src={offer.image_url} alt="" className="h-10 w-10 rounded-lg object-contain bg-white/70" loading="lazy" /> : <span className="text-xl">🏬</span>}

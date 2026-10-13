@@ -92,19 +92,4 @@ export const UpcItemDbProvider: ProviderAdapter = {
     }
   },
 
-  async findOffersForProduct(product): Promise<FetchedOffer[]> {
-    if (!product.gtin) return [];
-    try {
-      const cleanBarcode = product.gtin.replace(/[^\d]/g, "");
-      const res = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${cleanBarcode}`);
-      if (!res.ok) return [];
-      const data = await res.json();
-      const item = data.items?.[0];
-      if (!item || !item.offers) return [];
-
-      return item.offers.map(mapUpcItemDbOffer).filter((offer: FetchedOffer | null): offer is FetchedOffer => offer !== null);
-    } catch {
-      return [];
-    }
-  },
 };

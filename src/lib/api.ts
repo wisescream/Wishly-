@@ -562,14 +562,33 @@ export async function getUnreadCount(userId: string): Promise<number> {
 // EDGE FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
 
+export class ProductImportRateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProductImportRateLimitError";
+  }
+}
+
 export async function fetchProduct(url: string): Promise<FetchedProduct | null> {
   try {
     const { data, error } = await supabase.functions.invoke("fetch-product", {
       body: { url },
     });
-    if (error) throw error;
+    if (error) {
+      const context = error.context;
+      if (context instanceof Response && context.status === 429) {
+        let message = "You have reached the URL import limit. Wait one minute and try again.";
+        try {
+          const payload = await context.clone().json() as { error?: unknown };
+          if (typeof payload.error === "string" && payload.error.trim()) message = payload.error;
+        } catch { /* Keep the explicit rate-limit message. */ }
+        throw new ProductImportRateLimitError(message);
+      }
+      throw error;
+    }
     return data as FetchedProduct;
-  } catch {
+  } catch (error) {
+    if (error instanceof ProductImportRateLimitError) throw error;
     return null;
   }
 }
