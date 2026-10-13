@@ -34,13 +34,13 @@ export function parseSitemapLocations(xml: string, baseUrl: string): string[] {
   }).slice(0, 200);
 }
 
-export function chooseSitemapProductPages(locations: string[], limit = 4): string[] {
+export function chooseSitemapProductPages(locations: string[], limit = 4, isProductSitemap = false): string[] {
   const max = Number.isFinite(limit) ? Math.max(0, Math.min(8, Math.floor(limit))) : 0;
   if (!max) return [];
   const seen = new Set<string>();
   return locations.flatMap((location) => {
     try {
-      if (!PRODUCT_PATH.test(new URL(location).pathname) || seen.has(location)) return [];
+      if ((!isProductSitemap && !PRODUCT_PATH.test(new URL(location).pathname)) || seen.has(location)) return [];
       seen.add(location);
       return [location];
     } catch { return []; }
@@ -56,6 +56,11 @@ function sitemapLinksFromRobots(robots: string): string[] {
     const match = line.match(/^\s*sitemap\s*:\s*(\S+)/i);
     return match ? [match[1]] : [];
   }).slice(0, 3);
+}
+
+export function isProductSitemapUrl(url: string): boolean {
+  try { return /(?:^|\/)(?:sitemap[_-])?(?:products?|catalog)(?:[_./-]|$)/i.test(new URL(url).pathname); }
+  catch { return false; }
 }
 
 async function fetchSmallText(
@@ -116,7 +121,7 @@ export async function inspectRetailerCatalog(
     if (sitemap.status === 429 || sitemap.status >= 500) { sitemapError = `sitemap_http_${sitemap.status}`; continue; }
     if (getRetailerDomain(sitemap.finalUrl.href) !== domain) { sitemapError = "cross_domain_sitemap_redirect"; continue; }
     const locations = parseSitemapLocations(sitemap.text, sitemap.finalUrl.href);
-    productPages = chooseSitemapProductPages(locations, 4);
+    productPages = chooseSitemapProductPages(locations, 4, isProductSitemapUrl(sitemap.finalUrl.href));
     if (!productPages.length && /<sitemapindex\b/i.test(sitemap.text)) {
       const childSitemaps = locations.filter((location) => /product|catalog|sitemap/i.test(new URL(location).pathname)).slice(0, 2);
       for (const child of childSitemaps) {
@@ -129,7 +134,9 @@ export async function inspectRetailerCatalog(
         if (childResponse.status === 401 || childResponse.status === 403) { sitemapError = "robots_restricted"; continue; }
         if (childResponse.status === 429 || childResponse.status >= 500) { sitemapError = `sitemap_http_${childResponse.status}`; continue; }
         if (getRetailerDomain(childResponse.finalUrl.href) !== domain) { sitemapError = "cross_domain_sitemap_redirect"; continue; }
-        productPages = chooseSitemapProductPages(parseSitemapLocations(childResponse.text, childResponse.finalUrl.href), 4);
+        productPages = chooseSitemapProductPages(
+          parseSitemapLocations(childResponse.text, childResponse.finalUrl.href), 4, isProductSitemapUrl(childResponse.finalUrl.href),
+        );
         if (productPages.length) break;
       }
     }

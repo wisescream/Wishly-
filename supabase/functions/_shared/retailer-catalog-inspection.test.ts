@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseSitemapProductPages, inspectRetailerCatalog, parseSitemapLocations, retailerCatalogEvidenceIsSufficient } from "./retailer-catalog-inspection.ts";
+import { chooseSitemapProductPages, inspectRetailerCatalog, isProductSitemapUrl, parseSitemapLocations, retailerCatalogEvidenceIsSufficient } from "./retailer-catalog-inspection.ts";
 import type { PinnedFetchTransport, PinnedSocket } from "./pinned-fetch.ts";
 
 function retailerTransport(host = "shop.example", robots = `User-agent: *\nAllow: /\nSitemap: https://${host}/sitemap.xml`): PinnedFetchTransport {
@@ -64,6 +64,20 @@ describe("bounded retailer catalog inspection", () => {
       "https://shop.example/product/shoe-1",
     ]);
     expect(chooseSitemapProductPages(["not a URL"])).toEqual([]);
+    expect(chooseSitemapProductPages([
+      "https://shop.example/blue-jacket-81",
+      "https://shop.example/linen-trousers-90",
+    ], 2, true)).toEqual([
+      "https://shop.example/blue-jacket-81",
+      "https://shop.example/linen-trousers-90",
+    ]);
+  });
+
+  it("recognizes product-specific sitemap files for stores using slug URLs", () => {
+    expect(isProductSitemapUrl("https://shop.example/sitemap_products_1.xml")).toBe(true);
+    expect(isProductSitemapUrl("https://shop.example/sitemaps/catalog.xml")).toBe(true);
+    expect(isProductSitemapUrl("https://shop.example/sitemap.xml")).toBe(false);
+    expect(isProductSitemapUrl("javascript:alert(1)")).toBe(false);
   });
 
   it("validates a retailer only when a product page exposes title, price, currency, and image", () => {
