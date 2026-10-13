@@ -1,4 +1,19 @@
 export interface ImageBox { x: number; y: number; width: number; height: number }
+export interface FashionItemDetails { category: string; brand: string; description: string }
+
+export function mergeFashionCandidateDetails(
+  selected: FashionItemDetails,
+  candidate: { brand?: string | null; description?: string | null },
+): FashionItemDetails {
+  const descriptions = [selected.description, candidate.description]
+    .map((value) => value?.trim() || "")
+    .filter((value, index, values) => value && values.findIndex((other) => other.toLowerCase() === value.toLowerCase()) === index);
+  return {
+    category: selected.category,
+    brand: selected.brand.trim() || candidate.brand?.trim() || "",
+    description: descriptions.join(" · "),
+  };
+}
 
 export function selectionBox(startX: number, startY: number, endX: number, endY: number): ImageBox | null {
   const x = Math.max(0, Math.min(1, Math.min(startX, endX)));

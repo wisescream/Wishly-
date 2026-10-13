@@ -16,9 +16,6 @@ serve(async (req) => {
     const client = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authorization } } });
     const { data: auth } = await client.auth.getUser();
     if (!auth.user) return json({ error: "Authentication required." }, 401);
-    const { data: reserved, error: limitError } = await client.rpc("reserve_interactive_provider_request", { p_surface: "image_search" });
-    if (limitError) return json({ error: "Image processing limits are temporarily unavailable." }, 503);
-    if (reserved !== true) return json({ error: "Image-search limit reached. Try again in a minute." }, 429);
 
     const endpoint = Deno.env.get("FASHION_ITEM_DETECTION_URL")?.trim();
     const token = Deno.env.get("FASHION_ITEM_DETECTION_TOKEN")?.trim();
@@ -32,6 +29,9 @@ serve(async (req) => {
     const file = form.get("image");
     if (!(file instanceof File) || file.size < 1 || file.size > 4 * 1024 * 1024) return json({ error: "Upload a JPEG, PNG, or WebP image up to 4 MB." }, 400);
     if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type)) return json({ error: "Upload a JPEG, PNG, or WebP image." }, 400);
+    const { data: reserved, error: limitError } = await client.rpc("reserve_interactive_provider_request", { p_surface: "image_search" });
+    if (limitError) return json({ error: "Image processing limits are temporarily unavailable." }, 503);
+    if (reserved !== true) return json({ error: "Image-search limit reached. Try again in a minute." }, 429);
     const bytes = new Uint8Array(await file.arrayBuffer());
     let binary = "";
     for (let offset = 0; offset < bytes.length; offset += 0x8000) {

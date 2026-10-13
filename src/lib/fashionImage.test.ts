@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { imageCropPixels, selectionBox } from "./fashionImage";
+import { imageCropPixels, mergeFashionCandidateDetails, selectionBox } from "./fashionImage";
 
 describe("interactive image item selection", () => {
   it("creates a normalized selection regardless of drag direction", () => {
@@ -9,5 +9,19 @@ describe("interactive image item selection", () => {
 
   it("uses original image coordinates to create a crop", () => {
     expect(imageCropPixels({ x: 0.25, y: 0.5, width: 0.5, height: 0.25 }, 800, 400)).toEqual({ x: 200, y: 200, width: 400, height: 100 });
+  });
+
+  it("keeps the selected clothing details when a visual candidate omits them", () => {
+    expect(mergeFashionCandidateDetails(
+      { category: "sneakers", brand: "Nike", description: "white, low-top" },
+      { brand: null, description: null },
+    )).toEqual({ category: "sneakers", brand: "Nike", description: "white, low-top" });
+  });
+
+  it("adds candidate metadata without duplicating the selected item description", () => {
+    expect(mergeFashionCandidateDetails(
+      { category: "jacket", brand: "", description: "blue denim" },
+      { brand: "Levi's", description: "Blue denim jacket" },
+    )).toEqual({ category: "jacket", brand: "Levi's", description: "blue denim · Blue denim jacket" });
   });
 });

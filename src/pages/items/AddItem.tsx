@@ -17,6 +17,7 @@ import { getWishlists } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 import { FashionImageSearchPanel } from '@/components/shared/FashionImageSearchPanel';
+import { mergeFashionCandidateDetails } from '@/lib/fashionImage';
 import {
   importByNameSearch,
   importFromBarcode,
@@ -137,18 +138,22 @@ export default function AddItem() {
   }, [scanActive]);
 
   const fillFromCandidate = async (candidate: ProductCandidate) => {
+    const selectedFashionDetails = mergeFashionCandidateDetails(
+      { category, brand, description },
+      { brand: candidate.brand, description: candidate.description },
+    );
     setPrice('');
     setPriceSource('user_entered');
     setOriginalPrice('');
     setTitle(candidate.title);
-    setBrand(candidate.brand || '');
+    setBrand(selectedFashionDetails.brand);
     setModel(candidate.model_number || '');
     setGtin(candidate.gtin || '');
     setProductVerified(Boolean(candidate.gtin && isValidGtin(candidate.gtin.replace(/\D/g, "")) && candidate.confidence >= 0.99));
     setImageUrl(candidate.image_url || '');
     setAdditionalImages([]);
-    setDescription(candidate.description || '');
-    setCategory('');
+    setDescription(selectedFashionDetails.description);
+    setCategory(selectedFashionDetails.category);
     setVariant('');
     setCondition(normalizeProductCondition(candidate.condition || candidate.title));
     setVariantDetails({});
@@ -165,7 +170,7 @@ export default function AddItem() {
     setCandidates([]);
     discoverOffersForProduct({
       title: candidate.title,
-      brand: candidate.brand,
+      brand: selectedFashionDetails.brand,
       model_number: candidate.model_number,
       gtin: candidate.gtin,
     }).then((offers) => setDiscoveredOffers(offers)).catch(() => {});
