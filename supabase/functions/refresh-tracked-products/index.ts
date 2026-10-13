@@ -50,7 +50,7 @@ serve(async (req) => {
     const apiKey = Deno.env.get("SERPAPI_KEY");
     const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
     const tavilyKey = Deno.env.get("TAVILY_API_KEY");
-    const tavilyEnabled = Boolean(tavilyKey) && Deno.env.get("TAVILY_ALLOW_PAID_SEARCH") === "true";
+    const tavilyEnabled = Boolean(tavilyKey);
     if (!url || !serviceKey) return json({ error: "Service is not configured." }, 503);
     const admin = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
     const token = req.headers.get("x-price-check-secret");

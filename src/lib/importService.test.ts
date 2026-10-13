@@ -64,7 +64,7 @@ describe("URL import", () => {
     searchGlobalProductsMock.mockResolvedValue([]);
   });
 
-  it("searches a sanitized page slug but leaves product fields unfilled when fetching fails", async () => {
+  it("uses a sanitized page slug as an editable preview when fetching fails", async () => {
     const candidate = { title: "Nike Air Max 90", confidence: 0.72 };
     fetchProductMock.mockRejectedValueOnce(new Error("retailer blocked the request"));
     searchGlobalProductsMock.mockResolvedValueOnce([candidate]);
@@ -74,7 +74,7 @@ describe("URL import", () => {
     expect(searchGlobalProductsMock).toHaveBeenCalledWith("nike air max 90");
     expect(result.candidates).toEqual([candidate]);
     expect(result.product).toMatchObject({
-      title: "",
+      title: "nike air max 90",
       price: null,
       currency: "",
       store: "shop.example",

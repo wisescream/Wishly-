@@ -4,14 +4,34 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { supabase } from '@/lib/supabase';
+import { importFromImage } from '@/lib/importService';
 import { imageCropPixels, selectionBox, type ImageBox } from '@/lib/fashionImage';
 import type { ProductCandidate } from '@/types/database';
 
 type Detection = { id: string; category: string; label: string; confidence: number; bbox: ImageBox; color?: string | null; pattern?: string | null; brand?: string | null };
-type Props = { onCandidates: (items: ProductCandidate[]) => void; onSelectedItem: (item: { category: string; brand: string; description: string }) => void };
+type Props = { onCandidates: (items: ProductCandidate[]) => void; onSelectedItem: (item: { category: string; brand: string; description: string }) => void; onSelectCandidate: (candidate: ProductCandidate) => void };
 const categories = ['top', 'shirt', 'jacket', 'coat', 'hoodie', 'sweater', 'trousers', 'jeans', 'shorts', 'skirt', 'dress', 'suit', 'sneakers', 'shoes', 'boots', 'handbag', 'backpack', 'hat', 'jewelry', 'accessory', 'other'];
 
-export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props) {
+async function prepareDetectionImage(file: File): Promise<File> {
+  if (file.size <= 3.8 * 1024 * 1024) return file;
+  const bitmap = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, 1800 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Could not prepare this image for item detection.');
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    for (const quality of [0.84, 0.72, 0.6, 0.48]) {
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (blob && blob.size <= 3.8 * 1024 * 1024) return new File([blob], 'wishly-detection.jpg', { type: 'image/jpeg' });
+    }
+    throw new Error('This image is too large for automatic item detection. You can still search it or choose a manual crop.');
+  } finally { bitmap.close(); }
+}
+
+export function FashionImageSearchPanel({ onCandidates, onSelectedItem, onSelectCandidate }: Props) {
   const [imageUrl, setImageUrl] = useState('');
   const [originalFile, setOriginalFile] = useState<File | null>(null);
   const [cropFile, setCropFile] = useState<File | null>(null);
@@ -23,7 +43,9 @@ export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props)
   const [category, setCategory] = useState('other');
   const [brand, setBrand] = useState('');
   const [status, setStatus] = useState<'idle' | 'detecting' | 'searching'>('idle');
-  const [message, setMessage] = useState('Choose an image. If automatic detection is unavailable, draw a rectangle around one item.');
+  const [message, setMessage] = useState('Choose an image to detect and search products. Manual crop is available as a fallback.');
+  const [manualSelection, setManualSelection] = useState(false);
+  const [results, setResults] = useState<ProductCandidate[]>([]);
   const imageRef = useRef<HTMLImageElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -57,14 +79,19 @@ export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props)
 
   const chooseBox = async (box: ImageBox, detected?: Detection) => {
     if (!originalFile) return;
+    setResults([]); onCandidates([]);
     setSelected(detected || { id: 'manual-selection', category, label: category, confidence: 1, bbox: box });
+    setCropFile(null);
     setCategory(detected?.category || category);
     setBrand(detected?.brand || '');
+    setStatus('detecting');
+    setMessage('Preparing the selected item crop…');
     try {
       await cropImage(originalFile, box);
       onSelectedItem({ category: detected?.category || category, brand: detected?.brand || '', description: [detected?.color, detected?.pattern].filter(Boolean).join(', ') });
       setMessage(detected ? `Selected ${detected.label}. Review the crop and search it.` : 'Manual selection ready. Review the crop and search it.');
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not crop this item.'); }
+    finally { setStatus('idle'); }
   };
 
   const loadImage = async (file?: File) => {
@@ -74,21 +101,23 @@ export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props)
       return;
     }
     setImageUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(file); });
-    setOriginalFile(file); setCropFile(null); setCropUrl(''); setDetections([]); setSelected(null); setDraft(null); onCandidates([]);
+    setOriginalFile(file); setCropFile(null); setCropUrl(''); setDetections([]); setSelected(null); setDraft(null); setManualSelection(false); setResults([]); onCandidates([]);
     setStatus('detecting');
     setMessage('Checking for separately visible clothing items…');
-    const form = new FormData(); form.append('image', file);
     try {
+      const detectorImage = await prepareDetectionImage(file);
+      const form = new FormData(); form.append('image', detectorImage);
       const { data, error } = await supabase.functions.invoke('detect-fashion-items', { body: form });
       const items = Array.isArray(data?.detections) ? data.detections as Detection[] : [];
       if (!error && items.length) {
         setDetections(items);
+        setManualSelection(false);
         setMessage(`Detected ${items.length} item${items.length === 1 ? '' : 's'}. Select one, or draw a region to correct it.`);
       } else {
-        setMessage(data?.message || 'Automatic item detection is not configured. Draw a rectangle around one item to search it.');
+        setMessage(data?.message || 'Automatic item detection is unavailable. Search the full image or choose manual crop as a fallback.');
       }
     } catch {
-      setMessage('Automatic item detection is unavailable. Draw a rectangle around one item to search it.');
+      setMessage('Automatic item detection is unavailable. Search the full image or choose manual crop as a fallback.');
     } finally { setStatus('idle'); }
   };
 
@@ -98,7 +127,7 @@ export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props)
     return { x: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)) };
   };
   const startDraw = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!originalFile || (event.target as HTMLElement).closest('[data-detection]')) return;
+    if (!originalFile || !manualSelection || (event.target as HTMLElement).closest('[data-detection]')) return;
     const start = point(event.clientX, event.clientY);
     if (start) { event.currentTarget.setPointerCapture(event.pointerId); setDragStart(start); setDraft(null); }
   };
@@ -117,14 +146,24 @@ export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props)
 
   const findSelectedItem = async () => {
     if (!cropFile) return;
-    setStatus('searching'); setMessage(`Searching visual matches for this ${category} crop…`); onCandidates([]);
-    const form = new FormData(); form.append('image', cropFile);
+    setStatus('searching'); setMessage(`Searching visual matches for this ${category} crop…`); onCandidates([]); setResults([]);
     try {
-      const { data, error } = await supabase.functions.invoke('search-image', { body: form });
-      if (error) throw new Error(data?.error || 'Visual product search failed.');
-      const candidates = Array.isArray(data?.candidates) ? data.candidates as ProductCandidate[] : [];
-      onCandidates(candidates);
-      setMessage(candidates.length ? `Found ${candidates.length} visual candidates. Confirm model, color, and variant before saving.` : data?.error || 'No visual matches found. Try a tighter crop or add a product name below.');
+      const result = await importFromImage(cropFile);
+      setResults(result.candidates); onCandidates(result.candidates);
+      setMessage(result.candidates.length ? `Found ${result.candidates.length} visual candidates. Exact matches appear first; confirm the product and variant before saving.` : 'No visual matches found. Try another detected item or search the full image.');
+    } catch (error) {
+      const text = error instanceof Error ? error.message : 'Visual product search failed.';
+      setMessage(text); toast.error(text);
+    } finally { setStatus('idle'); }
+  };
+
+  const findWholeImage = async () => {
+    if (!originalFile) return;
+    setStatus('searching'); setMessage('Searching the full image with Google Lens…'); setResults([]); onCandidates([]);
+    try {
+      const result = await importFromImage(originalFile);
+      setResults(result.candidates); onCandidates(result.candidates);
+      setMessage(result.candidates.length ? `Found ${result.candidates.length} visual candidates. Exact matches appear first.` : 'No visual matches found. Select an item box or try manual crop.');
     } catch (error) {
       const text = error instanceof Error ? error.message : 'Visual product search failed.';
       setMessage(text); toast.error(text);
@@ -132,7 +171,7 @@ export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props)
   };
 
   return <section className="space-y-3 rounded-2xl border border-border p-4">
-    <div><h2 className="text-sm font-semibold">Find one clothing item in an image</h2><p className="mt-1 text-xs text-muted-foreground">Wishly keeps your original photo visible. Choose an automatically detected item or draw around one item; only its crop is sent for visual search.</p></div>
+    <div><h2 className="text-sm font-semibold">Import products from an image</h2><p className="mt-1 text-xs text-muted-foreground">Upload a product photo, screenshot, outfit, or collage. Automatic item boxes need the configured detection model; Google Lens handles visual matching. Search the full image or select an item crop.</p></div>
     <Input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void loadImage(event.target.files?.[0])} disabled={status !== 'idle'} />
     {imageUrl && <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_180px]">
       <div ref={wrapperRef} className="relative w-full touch-none select-none" onPointerDown={startDraw} onPointerMove={moveDraw} onPointerUp={(event) => void endDraw(event)} onPointerCancel={() => { setDragStart(null); setDraft(null); }}>
@@ -141,8 +180,11 @@ export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props)
         {draft && <div className="pointer-events-none absolute rounded-md border-2 border-amber-400 bg-amber-300/15" style={{ left: `${draft.x * 100}%`, top: `${draft.y * 100}%`, width: `${draft.width * 100}%`, height: `${draft.height * 100}%` }} />}
       </div>
       <div className="space-y-2">
+        <Button type="button" variant="outline" onClick={() => void findWholeImage()} disabled={status !== 'idle'} className="w-full rounded-lg"><Search className="mr-2 h-4 w-4" />Search full image</Button>
+        <Button type="button" variant={manualSelection ? 'default' : 'outline'} onClick={() => setManualSelection((value) => !value)} disabled={status !== 'idle'} className="w-full rounded-lg">{manualSelection ? 'Manual crop enabled' : 'Choose manual crop (optional)'}</Button>
+        {detections.length > 0 && <p className="text-[10px] text-muted-foreground">Select another box to switch items without uploading again.</p>}
         <div className="rounded-xl border border-border bg-muted/30 p-2">
-          {cropUrl ? <img src={cropUrl} alt={`Selected ${category} crop`} className="aspect-square w-full rounded-lg object-contain" /> : <div className="flex aspect-square items-center justify-center text-center text-xs text-muted-foreground">Select or draw around one item</div>}
+          {cropUrl ? <img src={cropUrl} alt={`Selected ${category} crop`} className="aspect-square w-full rounded-lg object-contain" /> : <div className="flex aspect-square items-center justify-center text-center text-xs text-muted-foreground">Select an item box, search the full image, or enable manual crop</div>}
           {selected && <p className="mt-2 text-[10px] text-muted-foreground">{selected.label}{selected.color ? ` · ${selected.color}` : ''}{selected.pattern ? ` · ${selected.pattern}` : ''}</p>}
         </div>
         {selected && <>
@@ -153,7 +195,8 @@ export function FashionImageSearchPanel({ onCandidates, onSelectedItem }: Props)
         </>}
       </div>
     </div>}
-    {!imageUrl && <div className="flex items-center gap-2 rounded-xl bg-muted/30 p-3 text-xs text-muted-foreground"><Upload className="h-4 w-4 shrink-0" />Upload an outfit image to select the jacket, trousers, shoes, or accessory separately.</div>}
+    {!imageUrl && <div className="flex items-center gap-2 rounded-xl bg-muted/30 p-3 text-xs text-muted-foreground"><Upload className="h-4 w-4 shrink-0" />Upload a product image or collage to search it or select separate clothing, shoes, bags, and accessories.</div>}
+    {results.length > 0 && <div className="space-y-2" aria-live="polite"><h3 className="text-xs font-semibold">Google Lens candidates</h3>{results.map((candidate, index) => <div key={`${candidate.url || candidate.title}-${index}`} className="flex items-center gap-3 rounded-xl border border-border p-2">{candidate.image_url ? <img src={candidate.image_url} alt="" className="h-12 w-12 rounded-lg object-cover" /> : <span className="h-12 w-12 rounded-lg bg-muted" />}<button type="button" onClick={() => { onSelectCandidate(candidate); setResults([]); }} className="min-w-0 flex-1 text-left"><span className="block truncate text-xs font-medium">{candidate.title}</span><span className="block text-[10px] text-muted-foreground">{candidate.store || 'Web result'} · {candidate.match_reason}</span></button>{candidate.url && <a href={candidate.url} target="_blank" rel="noreferrer" className="text-[10px] text-primary">Open</a>}</div>)}</div>}
     <p className="text-xs text-muted-foreground" role="status" aria-live="polite">{status === 'detecting' ? <><Loader2 className="mr-1 inline h-3 w-3 animate-spin" />{message}</> : message}</p>
   </section>;
 }

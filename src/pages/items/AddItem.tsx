@@ -17,7 +17,6 @@ import { getWishlists } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 import { FashionImageSearchPanel } from '@/components/shared/FashionImageSearchPanel';
-import { ProductImageSearchPanel } from '@/components/shared/ProductImageSearchPanel';
 import { mergeFashionCandidateDetails } from '@/lib/fashionImage';
 import {
   importByNameSearch,
@@ -328,9 +327,9 @@ export default function AddItem() {
           </section>}
 
           {mode === 'image' && <>
-            <ProductImageSearchPanel onCandidates={setCandidates} />
             <FashionImageSearchPanel
               onCandidates={setCandidates}
+              onSelectCandidate={(candidate) => void fillFromCandidate(candidate)}
               onSelectedItem={(selectedItem) => {
                 setCategory(selectedItem.category);
                 setBrand(selectedItem.brand);
@@ -348,7 +347,7 @@ export default function AddItem() {
             {scanActive && <video ref={videoRef} muted playsInline className="w-full max-h-64 rounded-xl bg-black" />}
           </section>}
 
-          {candidates.length > 0 && <section className="space-y-2" aria-live="polite">
+          {mode !== 'image' && candidates.length > 0 && <section className="space-y-2" aria-live="polite">
             <h2 className="text-sm font-semibold">Choose the matching product</h2>
             <p className="text-xs text-muted-foreground">Search results are candidates. Confirm the brand, model, and variant before saving.</p>
             {candidates.map((candidate, index) => <button key={`${candidate.source}-${candidate.gtin || candidate.model_number || candidate.title}-${index}`}

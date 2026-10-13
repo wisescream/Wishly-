@@ -418,13 +418,14 @@ serve(async (req) => {
       });
     }
 
-    // Expanded discovery is opt-in in both the UI request and server config.
-    // No Tavily or OpenRouter web-search request can spend provider quota from
-    // the background worker or a normal Google Shopping refresh.
+    // Interactive expanded discovery requires a user opt-in. Regular refreshes
+    // cannot spend Tavily or OpenRouter quota from this path.
     const tavilyKey = Deno.env.get("TAVILY_API_KEY");
-    const tavilyEnabled = allowExpandedSearch && Deno.env.get("TAVILY_ALLOW_PAID_SEARCH") === "true" && Boolean(tavilyKey);
+    // The user must opt into expanded search in the request; the provider key
+    // and shared daily budget determine whether Tavily can then run.
+    const tavilyEnabled = allowExpandedSearch && Boolean(tavilyKey);
     if (allowExpandedSearch && !tavilyEnabled) {
-      tavilySearchError = !tavilyKey ? "Tavily is not configured. Add TAVILY_API_KEY and explicitly enable TAVILY_ALLOW_PAID_SEARCH to use it." : "Tavily discovery is disabled by project configuration.";
+      tavilySearchError = "Tavily is not configured. Add TAVILY_API_KEY to Supabase Edge Function secrets.";
     }
     const tavilyQueries = buildRetailerQueries({
       title: productTitle, brand: item.brand, model: item.model_number, sku: productVariant?.sku, gtin: productVariant?.gtin || item.gtin, variant: item.variant_label,

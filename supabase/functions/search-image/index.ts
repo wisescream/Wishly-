@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { parseEstimatedUnitCost, recordProviderMetric } from "../_shared/provider-metrics.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
+import { parseGoogleLensCandidates } from "../_shared/serpapi-lens.ts";
 
 const corsHeaders = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type" };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -74,7 +75,8 @@ serve(async (req) => {
     const search = new URL("https://serpapi.com/search.json");
     search.searchParams.set("engine", "google_lens");
     search.searchParams.set("image_id", uploadedData.image_id);
-    search.searchParams.set("type", "visual_matches");
+    // Request the default Lens response so exact_matches and visual_matches
+    // are both available. Exact matches are ranked first below.
     search.searchParams.set("gl", market.gl);
     search.searchParams.set("hl", market.hl);
     search.searchParams.set("api_key", key);
@@ -101,26 +103,7 @@ serve(async (req) => {
       await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome: "error", durationMs: Date.now() - searchStartedAt, statusCode: response.status, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: market.country });
       return json({ configured: true, candidates: [], error: "Image recognition provider could not complete this search." }, 502);
     }
-    const matches = Array.isArray(results.visual_matches) ? results.visual_matches : [];
-    const candidates = matches.slice(0, 12).flatMap((match: any) => {
-      const title = typeof match.title === "string" ? match.title.trim() : "";
-      const url = typeof match.link === "string" && /^https?:\/\//i.test(match.link) ? match.link : null;
-      if (!title) return [];
-      return [{
-        title,
-        brand: null,
-        model_number: null,
-        gtin: null,
-        image_url: typeof match.thumbnail === "string" ? match.thumbnail : null,
-        price: null,
-        currency: "",
-        store: typeof match.source === "string" ? match.source : null,
-        url,
-        confidence: 0.55,
-        match_reason: "Visual match from Google Lens. Confirm the model and variant before saving.",
-        source: "google_lens",
-      }];
-    });
+    const candidates = parseGoogleLensCandidates(results);
     await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome: "success", durationMs: Date.now() - searchStartedAt, resultCount: candidates.length, statusCode: response.status, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: market.country });
     return json({ configured: true, candidates });
   } catch (error) {

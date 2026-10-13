@@ -130,9 +130,12 @@ export async function importFromUrl(url: string): Promise<ImportResult> {
 
   // If fetch failed or returned empty title, use URL fallback
   if (!fetched || !fetched.title) {
-    const finalTitle = fetched?.title || "";
+    // URL slugs are still useful editable preview data when the retailer blocks
+    // page extraction. Previously the title was only used for candidate search,
+    // leaving the required title field empty.
+    const finalTitle = fetched?.title || urlFallback.title;
     const searchTitle = finalTitle || urlFallback.title;
-    const finalBrand = fetched?.brand || null;
+    const finalBrand = fetched?.brand || urlFallback.brand;
     const finalCurrency = fetched?.currency || urlFallback.currency;
     const finalStore = fetched?.store || urlFallback.store;
     const canonicalUrl = normalizeProductImportUrl(fetched?.canonical_url) || normalizeProductImportUrl(url) || url;
