@@ -100,7 +100,9 @@ export async function searchTavily(
   const response = await fetcher("https://api.tavily.com/search", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ query, topic: "general", search_depth: "basic", max_results: 8, ...(domains.length ? { include_domains: domains } : {}), include_answer: false, include_raw_content: false }),
+    // Tavily accepts up to 20 results per request. Three bounded market queries
+    // can therefore screen up to 60 search leads without adding provider calls.
+    body: JSON.stringify({ query, topic: "general", search_depth: "basic", max_results: 20, ...(domains.length ? { include_domains: domains } : {}), include_answer: false, include_raw_content: false }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) return { response, data: { results: [], answer: null, error: `Tavily returned HTTP ${response.status}.` } };

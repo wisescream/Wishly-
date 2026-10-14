@@ -485,14 +485,16 @@ serve(async (req) => {
     const { data: knownRetailers } = await admin.from("retailers").select("canonical_domain")
       .in("validation_status", ["discovered", "validated"])
       .in("country_code", [...new Set([targetCountry || "MA", "GLOBAL"])])
-      .limit(20);
-    const knownDomains = (knownRetailers || []).map((retailer) => String(retailer.canonical_domain || "")).filter(Boolean);
+      .order("canonical_domain").limit(40);
+    const knownDomains = [...new Set((knownRetailers || []).map((retailer) => String(retailer.canonical_domain || "").toLowerCase().replace(/^www\./, "")).filter(Boolean))];
     if (tavilyEnabled) {
       const unlimitedTavilyEmails = new Set((Deno.env.get("TAVILY_UNLIMITED_USER_EMAILS") || "")
         .split(",").map((email) => email.trim().toLowerCase()).filter(Boolean));
       const tavilyUserIsUnlimited = Boolean(userData.user.email && unlimitedTavilyEmails.has(userData.user.email.trim().toLowerCase()));
       for (const [queryIndex, query] of tavilyQueries.slice(0, 3).entries()) {
-        const includeDomains = queryIndex === 1 ? knownDomains : [];
+        // Search the complete current-market registry in Tavily's 20-domain
+        // batches. Restricted and unavailable retailers stay excluded above.
+        const includeDomains = queryIndex === 1 ? knownDomains.slice(0, 20) : queryIndex === 2 ? knownDomains.slice(20, 40) : [];
         const cacheInput = `${query.toLowerCase().replace(/\s+/g, " ").trim()}|${includeDomains.join(",")}`;
         const queryDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(cacheInput));
         const queryHash = Array.from(new Uint8Array(queryDigest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -541,7 +543,18 @@ serve(async (req) => {
           tavilyQueriesCount++;
         }
 
-        for (const lead of candidates) {
+        // Screen every returned search lead against the target identity before
+        // choosing the small, safe set of retailer pages to fetch. This lets a
+        // refresh rank a 50+ result pool without making 50 outbound page requests.
+        const screenedCandidates = candidates.map((lead) => {
+          const leadText = `${lead.title} ${lead.content}`;
+          const leadMatch = matchListing(leadText, matchTarget);
+          return {
+            lead,
+            rank: (leadMatch?.confidence || 0) * 0.8 + Math.max(0, Math.min(1, lead.score || 0)) * 0.2,
+          };
+        }).sort((left, right) => right.rank - left.rank);
+        for (const { lead } of screenedCandidates) {
           if (tavilyPagesInspected >= maxTavilyPagesPerRefresh || inspectionBudget >= maxRetailerPagesPerRefresh) break;
           const domain = getRetailerDomain(lead.url);
           if (!domain || !retailerFromUrl(lead.url) || inspectedDomains.has(domain)) continue;
@@ -642,7 +655,7 @@ serve(async (req) => {
             is_verified: pageIdentityConfirmed,
           });
         }
-        if (tavilyPagesInspected >= 2 || inspectionBudget >= maxRetailerPagesPerRefresh) break;
+        if (tavilyPagesInspected >= maxTavilyPagesPerRefresh || inspectionBudget >= maxRetailerPagesPerRefresh) break;
       }
     }
 
