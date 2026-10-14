@@ -1,7 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { getAlertDeduplicationKey, getAlertObservation, getAlertSourceLabel, isBackInStockAlert } from "./_shared/price-alert.ts";
-import { addOfferCurrencyConversions } from "./_shared/exchange-rate.ts";
+import { getAlertDeduplicationKey, getAlertObservation, getAlertSourceLabel, isBackInStockAlert } from "../_shared/price-alert.ts";
+import { addOfferCurrencyConversions } from "../_shared/exchange-rate.ts";
+import { matchesPreferredOfferSize } from "../_shared/size-preference.ts";
 
 const corsHeaders = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-price-check-secret" };
 
@@ -37,8 +38,15 @@ serve(async (req) => {
       checked++;
       const ownerId = item.owner_id;
       if (!ownerId) continue;
+      const [itemResult, profileResult] = await Promise.all([
+        supabase.from("items").select("category").eq("id", item.id).maybeSingle(),
+        supabase.from("style_profiles").select("apparel_sizes,shoe_sizes").eq("user_id", ownerId).maybeSingle(),
+      ]);
+      if (itemResult.error || profileResult.error) throw itemResult.error || profileResult.error;
+      const itemCategory = itemResult.data?.category || null;
+      const sizeProfile = profileResult.data || null;
       const { data: offers, error: offersError } = await supabase.from("store_offers")
-        .select("id,price,total_price,currency,condition,availability,last_verified_at,created_at,total_is_estimated,product_match_confidence,source,store,url,is_verified")
+        .select("id,price,total_price,currency,condition,availability,last_verified_at,created_at,total_is_estimated,shipping_known,taxes_known,product_match_confidence,source,store,url,is_verified,size_label,size_system")
         .eq("item_id", item.id)
         .gte("last_verified_at", cutoff)
         .order("last_verified_at", { ascending: false })
@@ -47,6 +55,7 @@ serve(async (req) => {
 
       const localizedOffers = await addOfferCurrencyConversions(offers || [], String(item.currency || "USD"));
       for (const sourceOffer of localizedOffers) {
+        if (!matchesPreferredOfferSize(sizeProfile, itemCategory, sourceOffer.size_label, sourceOffer.size_system)) continue;
         const offer = sourceOffer.currency === item.currency || sourceOffer.currency_converted_to === item.currency
           ? {
             ...sourceOffer,
@@ -58,7 +67,7 @@ serve(async (req) => {
           : sourceOffer;
         const alertObservation = getAlertObservation(item, offer);
         if (alertObservation) {
-          const { price: observedPrice, completeTotal: hasCompleteTotal, target: hitTarget, percentage, newCheaper } = alertObservation;
+          const { price: observedPrice, completeTotal: hasCompleteTotal, target: hitTarget, percentage, newCheaper, missingCosts } = alertObservation;
           const { data: event, error: eventError } = await supabase.from("price_alert_events")
             .upsert({ user_id: ownerId, item_id: item.id, offer_id: offer.id, observed_at: offer.last_verified_at, price: observedPrice, currency: offer.currency },
               { onConflict: "item_id,offer_id,observed_at", ignoreDuplicates: true })
@@ -84,7 +93,7 @@ serve(async (req) => {
               const verification = new Date(offer.last_verified_at || Date.now()).toLocaleString("en-US", { timeZone: "UTC" });
               const { data: notification, error: notificationError } = await supabase.from("notifications").upsert({
                 user_id: ownerId, type: "price_drop", title: `${criterion}: ${item.title}`,
-              body: `${getAlertSourceLabel(offer.source)} at ${offer.store} (${offer.condition} condition).${details}${fxNote} Checked ${verification} UTC.${hasCompleteTotal ? " Total includes known delivery costs." : " Shipping, taxes, availability, and checkout price are not confirmed."}`,
+              body: `${getAlertSourceLabel(offer.source)} at ${offer.store} (${offer.condition} condition).${details}${fxNote} Checked ${verification} UTC.${hasCompleteTotal ? " Total includes known delivery costs." : ` Item price only; ${missingCosts.join(", ")} unknown.`}`,
                 price_drop_key: eventKey,
                 payload: { item_id: item.id, offer_id: offer.id, variant: item.variant_label, condition: offer.condition, price: observedPrice, old_price: oldPrice, savings, target_price: item.target_price, price_drop_percent: item.price_drop_percent, currency: offer.currency, original_currency: offer.original_currency || offer.currency, exchange_rate: offer.exchange_rate, exchange_rate_at: offer.exchange_rate_at, source: offer.source, url: offer.url, verified_at: offer.last_verified_at, total_confirmed: hasCompleteTotal },
               }, { onConflict: "user_id,price_drop_key", ignoreDuplicates: true }).select("id").maybeSingle();

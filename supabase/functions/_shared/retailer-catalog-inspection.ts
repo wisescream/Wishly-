@@ -1,6 +1,6 @@
 import { fetchPinnedProductPage, type PinnedFetchTransport } from "./pinned-fetch.ts";
 import { inspectRetailerProductPage } from "./retailer-discovery.ts";
-import { getRetailerDomain, retailerPageRobotsAllowed } from "./retailer-discovery.ts";
+import { getRetailerDomain, retailerPageRobotsDecision } from "./retailer-discovery.ts";
 import type { DnsResolver } from "./url-security.ts";
 
 export type RetailerCatalogStatus = "validated" | "restricted" | "temporarily_unavailable" | "discovered" | "rejected";
@@ -68,18 +68,27 @@ async function fetchSmallText(
   resolveDns: DnsResolver,
   transport: PinnedFetchTransport,
   maxBodyBytes: number,
-): Promise<{ status: number; finalUrl: URL; text: string } | null> {
+): Promise<{ status: number | null; finalUrl: URL; text: string; errorCode?: string } | null> {
+  let redirectRobotsAccess: "allowed" | "restricted" | "temporarily_unavailable" = "allowed";
   try {
     const response = await fetchPinnedProductPage(url, resolveDns, transport, {
       maxBodyBytes,
       timeoutMs: 6_000,
       maxRedirects: 2,
-      onRedirect: (target) => retailerPageRobotsAllowed(target.href, resolveDns, transport),
+      onRedirect: async (target) => {
+        redirectRobotsAccess = await retailerPageRobotsDecision(target.href, resolveDns, transport);
+        return redirectRobotsAccess === "allowed";
+      },
     });
     if (response.truncated) return null;
     if (response.status < 200 || response.status >= 300) return { status: response.status, finalUrl: response.finalUrl, text: "" };
     return { status: response.status, finalUrl: response.finalUrl, text: new TextDecoder().decode(response.body) };
-  } catch { return null; }
+  } catch {
+    if (redirectRobotsAccess !== "allowed") {
+      return { status: null, finalUrl: new URL(url), text: "", errorCode: redirectRobotsAccess === "restricted" ? "robots_restricted" : "robots_unavailable" };
+    }
+    return null;
+  }
 }
 
 /**
@@ -100,8 +109,13 @@ export async function inspectRetailerCatalog(
   const robotsUrl = `${base}/robots.txt`;
   const robotsPage = await fetchSmallText(robotsUrl, resolveDns, transport, 128 * 1024);
   if (!robotsPage) return { status: "temporarily_unavailable", errorCode: "robots_unavailable", pageUrl: robotsUrl, httpStatus: null, evidence: empty };
+  if (robotsPage.errorCode) return {
+    status: robotsPage.errorCode === "robots_restricted" ? "restricted" : "temporarily_unavailable",
+    errorCode: robotsPage.errorCode, pageUrl: robotsUrl, httpStatus: null, evidence: empty,
+  };
   if (robotsPage.status === 401 || robotsPage.status === 403) return { status: "restricted", errorCode: `robots_http_${robotsPage.status}`, pageUrl: robotsUrl, httpStatus: robotsPage.status, evidence: empty };
-  if (robotsPage.status >= 500) return { status: "temporarily_unavailable", errorCode: `robots_http_${robotsPage.status}`, pageUrl: robotsUrl, httpStatus: robotsPage.status, evidence: empty };
+  if (robotsPage.status === 429 || robotsPage.status >= 500) return { status: "temporarily_unavailable", errorCode: `robots_http_${robotsPage.status}`, pageUrl: robotsUrl, httpStatus: robotsPage.status, evidence: empty };
+  if (robotsPage.status >= 400 && robotsPage.status !== 404 && robotsPage.status !== 410) return { status: "temporarily_unavailable", errorCode: `robots_http_${robotsPage.status}`, pageUrl: robotsUrl, httpStatus: robotsPage.status, evidence: empty };
 
   const robotsSitemaps = sitemapLinksFromRobots(robotsPage.text);
   const sitemapCandidates = [...new Set([...robotsSitemaps, `${base}/sitemap.xml`])]
@@ -110,12 +124,14 @@ export async function inspectRetailerCatalog(
   let sitemapError = "sitemap_not_found";
   let sitemapStatus: number | null = robotsPage.status;
   for (const sitemapUrl of sitemapCandidates) {
-    if (!await retailerPageRobotsAllowed(sitemapUrl, resolveDns, transport)) {
-      sitemapError = "robots_restricted";
+    const sitemapRobots = await retailerPageRobotsDecision(sitemapUrl, resolveDns, transport);
+    if (sitemapRobots !== "allowed") {
+      sitemapError = sitemapRobots === "restricted" ? "robots_restricted" : "robots_unavailable";
       continue;
     }
     const sitemap = await fetchSmallText(sitemapUrl, resolveDns, transport, 1024 * 1024);
     if (!sitemap) { sitemapError = "sitemap_unavailable"; continue; }
+    if (sitemap.errorCode) { sitemapError = sitemap.errorCode; continue; }
     sitemapStatus = sitemap.status;
     if (sitemap.status === 401 || sitemap.status === 403) { sitemapError = "robots_restricted"; continue; }
     if (sitemap.status === 429 || sitemap.status >= 500) { sitemapError = `sitemap_http_${sitemap.status}`; continue; }
@@ -125,12 +141,14 @@ export async function inspectRetailerCatalog(
     if (!productPages.length && /<sitemapindex\b/i.test(sitemap.text)) {
       const childSitemaps = locations.filter((location) => /product|catalog|sitemap/i.test(new URL(location).pathname)).slice(0, 2);
       for (const child of childSitemaps) {
-        if (!await retailerPageRobotsAllowed(child, resolveDns, transport)) {
-          sitemapError = "robots_restricted";
+        const childRobots = await retailerPageRobotsDecision(child, resolveDns, transport);
+        if (childRobots !== "allowed") {
+          sitemapError = childRobots === "restricted" ? "robots_restricted" : "robots_unavailable";
           continue;
         }
         const childResponse = await fetchSmallText(child, resolveDns, transport, 1024 * 1024);
         if (!childResponse) continue;
+        if (childResponse.errorCode) { sitemapError = childResponse.errorCode; continue; }
         if (childResponse.status === 401 || childResponse.status === 403) { sitemapError = "robots_restricted"; continue; }
         if (childResponse.status === 429 || childResponse.status >= 500) { sitemapError = `sitemap_http_${childResponse.status}`; continue; }
         if (getRetailerDomain(childResponse.finalUrl.href) !== domain) { sitemapError = "cross_domain_sitemap_redirect"; continue; }
@@ -146,7 +164,7 @@ export async function inspectRetailerCatalog(
 
   if (!productPages.length) {
     const restricted = sitemapError === "robots_restricted";
-    const temporarilyUnavailable = sitemapError === "sitemap_unavailable" || /^sitemap_http_(?:429|5\d\d)$/.test(sitemapError);
+    const temporarilyUnavailable = sitemapError === "sitemap_unavailable" || sitemapError === "robots_unavailable" || /^sitemap_http_(?:429|5\d\d)$/.test(sitemapError);
     return {
       status: restricted ? "restricted" : temporarilyUnavailable ? "temporarily_unavailable" : "discovered",
       errorCode: sitemapError,
@@ -166,6 +184,10 @@ export async function inspectRetailerCatalog(
     lastStatus = inspection.status;
     lastError = inspection.errorCode || lastError;
     const metadata = inspection.metadata;
+    if (inspection.errorCode === "cross_domain_product_redirect") {
+      lastError = inspection.errorCode;
+      continue;
+    }
     if (!metadata) continue;
     const evidence = {
       ...(metadata.title ? { title: metadata.title.slice(0, 300) } : {}),
@@ -186,7 +208,7 @@ export async function inspectRetailerCatalog(
   if (lastError === "robots_restricted" || lastStatus === 401 || lastStatus === 403) {
     return { status: "restricted", errorCode: lastError, pageUrl: lastPage, httpStatus: lastStatus, evidence: lastEvidence };
   }
-  if (lastError === "fetch_failed" || lastError === "unsafe_url" || lastStatus === 429 || (lastStatus != null && lastStatus >= 500)) {
+  if (lastError === "robots_unavailable" || lastError === "fetch_failed" || lastError === "fetch_unknown" || lastError === "response_truncated" || lastStatus === 429 || (lastStatus != null && lastStatus >= 500)) {
     return { status: "temporarily_unavailable", errorCode: lastError, pageUrl: lastPage, httpStatus: lastStatus, evidence: lastEvidence };
   }
   return { status: "discovered", errorCode: lastError, pageUrl: lastPage, httpStatus: lastStatus, evidence: lastEvidence };

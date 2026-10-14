@@ -49,7 +49,7 @@ export function StoreComparisonTable({
   }
 
   const isFresh = (offer: StoreOffer) => {
-    const checked = Date.parse(offer.last_verified_at || '');
+    const checked = Date.parse((offer.is_verified ? offer.last_verified_at : offer.last_checked_at || offer.last_verified_at) || '');
     return Number.isFinite(checked) && Date.now() - checked <= 24 * 60 * 60 * 1000;
   };
   const isHighConfidenceMatch = (offer: StoreOffer) => Number(offer.product_match_confidence || 0) >= 0.9
@@ -86,7 +86,7 @@ export function StoreComparisonTable({
       return a.currency === b.currency ? Number(a.shipping_cost || 0) - Number(b.shipping_cost || 0) : a.currency.localeCompare(b.currency);
     }
     if (sortBy === 'retailer') return a.store.localeCompare(b.store);
-    if (sortBy === 'recent') return Date.parse(b.last_verified_at || '') - Date.parse(a.last_verified_at || '');
+    if (sortBy === 'recent') return Date.parse((b.is_verified ? b.last_verified_at : b.last_checked_at || b.last_verified_at) || '') - Date.parse((a.is_verified ? a.last_verified_at : a.last_checked_at || a.last_verified_at) || '');
     const evidenceRank = compareOfferFreshnessAndAvailability(a, b);
     if (evidenceRank) return evidenceRank;
     if (a.is_verified !== b.is_verified) return a.is_verified ? -1 : 1;
@@ -156,7 +156,8 @@ export function StoreComparisonTable({
       <div className="divide-y divide-border/40">
         {sortedOffers.length === 0 && <p className="p-4 text-center text-xs text-muted-foreground">No offers match these filters.</p>}
         {sortedOffers.map((offer, index) => {
-          const verifiedAt = offer.last_verified_at ? Date.parse(offer.last_verified_at) : Number.NaN;
+          const verifiedAt = (offer.is_verified ? offer.last_verified_at : offer.last_checked_at || offer.last_verified_at)
+            ? Date.parse((offer.is_verified ? offer.last_verified_at : offer.last_checked_at || offer.last_verified_at)!) : Number.NaN;
           const isStale = !Number.isFinite(verifiedAt) || Date.now() - verifiedAt > 24 * 60 * 60 * 1000;
           const availability = (offer.availability || 'unknown').replace(/_/g, ' ');
           const sameCurrency = comparable(offer);
@@ -183,7 +184,7 @@ export function StoreComparisonTable({
                     </span>
                   </div>
                   <span className="text-[10px] text-muted-foreground">
-                    {formatProductCondition(offer.condition)} · {availability}{isStale ? ' · stale result' : offer.is_verified ? ` · retailer page checked ${new Date(offer.last_verified_at).toLocaleDateString()}` : ` · provider checked ${new Date(offer.last_verified_at).toLocaleDateString()}`}
+                    {formatProductCondition(offer.condition)} · {availability}{isStale ? ' · stale result' : offer.is_verified ? ` · retailer page checked ${new Date(offer.last_verified_at!).toLocaleDateString()}` : offer.last_checked_at ? ` · provider checked ${new Date(offer.last_checked_at).toLocaleDateString()}` : ''}
                   </span>
                   <span className="block text-[10px] text-muted-foreground">Seller type: {formatSellerType(offer.seller_type)}</span>
                   {offer.listing_title && <span className="block max-w-52 text-[10px] text-muted-foreground line-clamp-2">{offer.listing_title}</span>}

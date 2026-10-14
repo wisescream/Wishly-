@@ -17,6 +17,34 @@ export type SerpApiErrorCode =
   | "provider_unavailable"
   | "unknown";
 
+export interface SerpApiShoppingRequest {
+  url: URL;
+  error: "missing_query" | "invalid_request" | null;
+}
+
+/** Build only documented Google Shopping parameters; reject malformed identity before spending quota. */
+export function buildSerpApiShoppingRequest(input: {
+  query: string;
+  gl: string;
+  hl: string;
+  apiKey: string;
+}): SerpApiShoppingRequest {
+  const query = input.query.trim().replace(/\s+/g, " ");
+  const gl = input.gl.trim().toLowerCase();
+  const hl = input.hl.trim().toLowerCase();
+  if (!query) return { url: new URL("https://serpapi.com/search.json"), error: "missing_query" };
+  if (query.length > 240 || !/^[a-z]{2}$/.test(gl) || !/^[a-z]{2,3}(?:-[a-z]{2}|-\d{3})?$/.test(hl) || !input.apiKey.trim()) {
+    return { url: new URL("https://serpapi.com/search.json"), error: "invalid_request" };
+  }
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("engine", "google_shopping");
+  url.searchParams.set("q", query);
+  url.searchParams.set("gl", gl);
+  url.searchParams.set("hl", hl);
+  url.searchParams.set("api_key", input.apiKey);
+  return { url, error: null };
+}
+
 function providerMessage(body: string): string {
   try {
     const payload: unknown = JSON.parse(body);

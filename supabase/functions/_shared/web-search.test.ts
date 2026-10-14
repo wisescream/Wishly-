@@ -12,6 +12,8 @@ describe("bounded web-search citation parsing", () => {
     expect(citations).toHaveLength(1);
     expect(citations[0]).toMatchObject({ url: "https://shop.example/p/1", title: "Product", content: "Model X" });
     expect(isRetailerUrl("https://user:pass@shop.example/p")).toBe(false);
+    expect(isRetailerUrl("https://magazine.avito.ma/tag/maroc/page/3/")).toBe(false);
+    expect(isRetailerUrl("https://store.frmf.ma/collections/official-jerseys")).toBe(true);
   });
 
   it("parses supported currency formats without inventing a currency", () => {

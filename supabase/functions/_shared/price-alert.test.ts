@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { getAlertDeduplicationKey, getAlertObservation, getAlertSourceLabel, isBackInStockAlert } from "./price-alert";
 
 const now = Date.parse("2026-10-11T12:00:00.000Z");
-const base = { id: "offer-1", is_verified: true, price: 90, total_price: null, currency: "MAD", condition: "new", availability: "unknown", last_verified_at: new Date(now).toISOString(), total_is_estimated: true, product_match_confidence: 0.95 };
+const base = { id: "offer-1", is_verified: true, price: 90, total_price: null, currency: "MAD", condition: "new", availability: "unknown", last_verified_at: new Date(now).toISOString(), total_is_estimated: true, shipping_known: false, taxes_known: false, product_match_confidence: 0.95 };
 const item = { current_price: 100, target_price: null, currency: "MAD", condition: "new", price_drop_percent: null, alert_on_any_lower_price: false, alert_on_new_cheaper_offer: false, alert_on_back_in_stock: false };
 
 describe("price alert observations", () => {
   it("alerts on a fresh same-currency lower listing while labeling incomplete totals", () => {
     const observation = getAlertObservation({ ...item, alert_on_any_lower_price: true }, base, now);
-    expect(observation).toMatchObject({ price: 90, completeTotal: false, target: false, reason: "lower-than-original" });
+    expect(observation).toMatchObject({ price: 90, completeTotal: false, target: false, reason: "lower-than-original", missingCosts: ["shipping", "taxes", "availability", "final checkout total"] });
   });
 
   it("uses a complete total for target alerts and blocks mismatched currency or stale offers", () => {

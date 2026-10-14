@@ -5,6 +5,7 @@ export interface ProductMetadata {
   description: string | null;
   price: number | null;
   price_conflict: boolean;
+  price_valid_until: string | null;
   original_price: number | null;
   discount_percent: number | null;
   currency: string;
@@ -21,9 +22,18 @@ export interface ProductMetadata {
   variant_details: { color?: string; size?: string; capacity?: string; sku?: string };
 }
 
+export function isProductPriceCurrent(price: number | null, validUntil: string | null, now = Date.now()): boolean {
+  if (price == null || !Number.isFinite(price) || price <= 0) return false;
+  if (!validUntil) return true;
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(validUntil)
+    ? Date.parse(`${validUntil}T23:59:59.999Z`)
+    : Date.parse(validUntil);
+  return Number.isFinite(parsed) && parsed >= now;
+}
+
 const text = (value: unknown): string | null => {
   if (typeof value !== "string" && typeof value !== "number") return null;
-  const result = String(value).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const result = decode(String(value).replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
   return result || null;
 };
 
@@ -79,6 +89,52 @@ function jsonLdNodes(html: string): Record<string, any>[] {
   return nodes;
 }
 
+function microdataProduct(html: string): Record<string, any> | null {
+  const root = html.match(/<([a-z][\w:-]*)\b(?=[^>]*\bitemscope(?:\s|=|>|\/))(?=[^>]*\bitemtype\s*=\s*["'][^"']*schema\.org\/Product(?:["'#/]|$))[^>]*>/i);
+  if (!root || root.index == null) return null;
+  const tagName = root[1];
+  const close = new RegExp(`<\\/${tagName}\\s*>`, "ig");
+  close.lastIndex = root.index + root[0].length;
+  const closing = close.exec(html);
+  const scope = html.slice(root.index, closing ? closing.index + closing[0].length : html.length);
+  const values = new Map<string, string[]>();
+  const voidTags = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+  const tagRegex = /<([a-z][\w:-]*)\b[^>]*>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = tagRegex.exec(scope))) {
+    const tag = match[0];
+    const attrs = attributes(tag);
+    const property = attrs.itemprop?.split(/\s+/)[0]?.toLowerCase();
+    if (!property) continue;
+    let value = attrs.content || attrs.src || attrs.href || attrs["data-src"] || "";
+    if (!value && !voidTags.has(match[1].toLowerCase())) {
+      const tail = scope.slice(tagRegex.lastIndex);
+      const closeTag = new RegExp(`<\\/${match[1]}\\s*>`, "i");
+      const end = tail.search(closeTag);
+      value = end < 0 ? "" : tail.slice(0, end);
+    }
+    const cleaned = text(value);
+    if (cleaned) values.set(property, [...(values.get(property) || []), cleaned]);
+  }
+  const first = (...keys: string[]) => keys.map((key) => values.get(key)?.[0]).find(Boolean);
+  const images = values.get("image") || [];
+  const price = first("price");
+  const currency = first("pricecurrency");
+  const offers = price ? { price, ...(currency ? { priceCurrency: currency } : {}), ...(first("availability") ? { availability: first("availability") } : {}), ...(first("itemcondition") ? { itemCondition: first("itemcondition") } : {}) } : undefined;
+  const brand = first("brand");
+  return {
+    "@type": "Product",
+    name: first("name"),
+    image: images,
+    description: first("description"),
+    brand: brand ? { name: brand } : undefined,
+    sku: first("sku"),
+    gtin14: first("gtin14"), gtin13: first("gtin13"), gtin12: first("gtin12"), gtin: first("gtin"),
+    mpn: first("mpn"), model: first("model"), category: first("category"),
+    ...(offers ? { offers } : {}),
+  };
+}
+
 function absolute(value: unknown, base: string): string | null {
   const candidate = text(value);
   if (!candidate) return null;
@@ -114,6 +170,8 @@ function canonicalUrl(html: string, base: string): string | null {
 export function parseProductMetadata(html: string, pageUrl: string): ProductMetadata {
   const meta = metaValues(html);
   const products = jsonLdNodes(html);
+  const microdata = microdataProduct(html);
+  if (microdata) products.push(microdata);
   const product = products.filter((node) => {
     const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
     return types.some((type) => String(type).toLowerCase().split("/").pop() === "product") && node.name;
@@ -136,7 +194,9 @@ export function parseProductMetadata(html: string, pageUrl: string): ProductMeta
     const parsed = Number.parseFloat(raw);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   })();
-  const jsonLdPriceCandidates = offerCandidates.flatMap((candidate) => [candidate.price ?? candidate.lowPrice, candidate.highPrice]
+  // AggregateOffer.lowPrice is its advertised lowest product price; highPrice is
+  // a range boundary and must not be treated as a conflicting second offer.
+  const jsonLdPriceCandidates = offerCandidates.flatMap((candidate) => [candidate.price ?? candidate.lowPrice ?? candidate.highPrice]
     .map(parsePrice).filter((price): price is number => price != null));
   const metadataPriceCandidates = [meta["product:price:amount"], meta["og:price:amount"]]
     .map(parsePrice).filter((price): price is number => price != null);
@@ -229,6 +289,7 @@ export function parseProductMetadata(html: string, pageUrl: string): ProductMeta
     description: firstText(product.description, meta["og:description"], meta.description, meta["twitter:description"]),
     price: parsedPrice != null && Number.isFinite(parsedPrice) && parsedPrice > 0 ? parsedPrice : null,
     price_conflict: priceConflict,
+    price_valid_until: firstText(offer.priceValidUntil, offer.priceValidThrough, product.priceValidUntil),
     original_price: originalPrice,
     discount_percent: discount,
     currency: /^[A-Z]{3}$/.test(currency) ? currency.toUpperCase() : "",

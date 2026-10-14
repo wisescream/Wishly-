@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { classifySerpApiFailure, describeSerpApiHttpFailure, parseSerpApiShoppingResponse } from "./serpapi.ts";
+import { buildSerpApiShoppingRequest, classifySerpApiFailure, describeSerpApiHttpFailure, parseSerpApiShoppingResponse } from "./serpapi.ts";
 
 describe("SerpApi Shopping response parsing", () => {
+  it("builds the documented request and rejects malformed requests before quota reservation", () => {
+    const valid = buildSerpApiShoppingRequest({ query: "  Nike   Air Max ", gl: "FR", hl: "fr-MA", apiKey: "server-key" });
+    expect(valid.error).toBeNull();
+    expect(valid.url.searchParams.get("q")).toBe("Nike Air Max");
+    expect(valid.url.searchParams.get("gl")).toBe("fr");
+    expect(valid.url.searchParams.get("hl")).toBe("fr-ma");
+    expect(valid.url.searchParams.has("currency")).toBe(false);
+    expect(buildSerpApiShoppingRequest({ query: "  ", gl: "fr", hl: "fr", apiKey: "key" }).error).toBe("missing_query");
+    expect(buildSerpApiShoppingRequest({ query: "shoes", gl: "France", hl: "fr", apiKey: "key" }).error).toBe("invalid_request");
+  });
   it("returns shopping result rows", () => {
     const rows = [{ title: "Headphones", extracted_price: 90 }];
     expect(parseSerpApiShoppingResponse({ shopping_results: rows })).toEqual({ rows, error: null });

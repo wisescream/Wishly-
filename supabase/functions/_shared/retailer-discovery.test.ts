@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { classifySeller, getRetailerDomain, inferRetailerCountry, productOfferEvidenceError, robotsTxtAllowsPath, safeCanonicalProductUrl, selectRetailerInspectionTargets } from "./retailer-discovery.ts";
+import { classifyRetailerFailure, classifySeller, getRetailerDomain, inferRetailerCountry, productOfferEvidenceError, robotsTxtAllowsPath, safeCanonicalProductUrl, selectRetailerInspectionTargets } from "./retailer-discovery.ts";
 
 describe("retailer discovery utilities", () => {
+  it("separates restricted access from outages and backs off before retrying", () => {
+    expect(classifyRetailerFailure("robots_restricted")).toMatchObject({ status: "restricted", retryAfterMs: 30 * 24 * 60 * 60 * 1000 });
+    expect(classifyRetailerFailure("robots_unavailable")).toMatchObject({ status: "temporarily_unavailable", retryAfterMs: 24 * 60 * 60 * 1000 });
+    expect(classifyRetailerFailure("http_429", 429).status).toBe("temporarily_unavailable");
+    expect(classifyRetailerFailure("unsupported_format", 200)).toMatchObject({ status: "discovered", class: "unsupported_format", retryAfterMs: 30 * 24 * 60 * 60 * 1000 });
+    expect(classifyRetailerFailure("http_404", 404)).toMatchObject({ status: "discovered", class: "permanently_unavailable", retryAfterMs: 30 * 24 * 60 * 60 * 1000 });
+  });
+
   it("normalizes public retailer domains and rejects unsafe URL shapes", () => {
     expect(getRetailerDomain("https://www.shop.example/products/shoe?ref=campaign")).toBe("shop.example");
     expect(getRetailerDomain("http://127.0.0.1/admin")).toBeNull();
@@ -56,6 +64,13 @@ describe("retailer discovery utilities", () => {
       { ...other, url: "https://possible.example/item", product_match_confidence: 0.84 },
     ], 2)).toEqual([best, other]);
     expect(selectRetailerInspectionTargets([best], 0)).toEqual([]);
+  });
+
+  it("keeps later ranked retailers available for inspection on subsequent runs", () => {
+    const candidates = ["one", "two", "three", "four"].map((name, index) => ({
+      source: "google_shopping", url: `https://${name}.example/item`, product_match_confidence: 0.99 - index / 100,
+    }));
+    expect(selectRetailerInspectionTargets(candidates, 40)).toEqual(candidates);
   });
 });
 

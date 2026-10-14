@@ -31,6 +31,19 @@ describe("research result persistence", () => {
     expect(result).toEqual({ attempted: 1, failed: 1, errorCode: null });
   });
 
+  it("submits one observation per offer per run and keeps currency-distinct listings separate", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const admin = { async rpc(_name: string, args: Record<string, unknown>) { calls.push(args); return { data: "observation", error: null }; } };
+    const result = await recordOfferPriceObservations(admin, "item-1", [
+      { id: "offer-1", price: 100, currency: "MAD" },
+      { id: "offer-1", price: 100, currency: "MAD" },
+      { id: "offer-2", price: 90, currency: "EUR" },
+    ], "2026-10-14T00:00:00.000Z");
+    expect(result.attempted).toBe(2);
+    expect(calls.map((call) => call.p_offer_id)).toEqual(["offer-1", "offer-2"]);
+    expect(calls[0].p_price).toBe(100);
+  });
+
   it("sets a backoff retry and logs only the database error code", async () => {
     const update = vi.fn(async () => ({ error: null }));
     const eq = vi.fn(async () => ({ error: null }));

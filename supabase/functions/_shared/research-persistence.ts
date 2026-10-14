@@ -32,7 +32,9 @@ export async function recordOfferPriceObservations(
   offers: PersistenceOffer[],
   fallbackTimestamp: string,
 ): Promise<{ attempted: number; failed: number; errorCode: string | null }> {
-  const eligible = offers.filter((offer) => offer.id && Number.isFinite(offer.price) && Number(offer.price) > 0 && Boolean(offer.currency));
+  const eligible = [...new Map(offers
+    .filter((offer) => offer.id && Number.isFinite(offer.price) && Number(offer.price) > 0 && Boolean(offer.currency))
+    .map((offer) => [offer.id!, offer])).values()];
   const results = await Promise.allSettled(eligible.map((offer) => admin.rpc("record_price_observation", {
     p_item_id: itemId,
     p_offer_id: offer.id,
@@ -70,6 +72,7 @@ export async function deferPersistenceRetry(
     const result = await admin.from("items").update({
       last_offer_search_at: attemptedAt,
       next_offer_search_at: retryAt,
+      offer_research_lease_until: null,
       offer_search_attempts: attempts,
       enrichment_status: "failed",
       enrichment_error: "Search results could not be saved. Wishly retained existing offers and scheduled a retry.",

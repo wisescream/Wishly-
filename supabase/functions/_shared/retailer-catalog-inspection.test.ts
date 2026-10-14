@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chooseSitemapProductPages, inspectRetailerCatalog, isProductSitemapUrl, parseSitemapLocations, retailerCatalogEvidenceIsSufficient } from "./retailer-catalog-inspection.ts";
 import type { PinnedFetchTransport, PinnedSocket } from "./pinned-fetch.ts";
 
-function retailerTransport(host = "shop.example", robots = `User-agent: *\nAllow: /\nSitemap: https://${host}/sitemap.xml`): PinnedFetchTransport {
+function retailerTransport(host = "shop.example", robots = `User-agent: *\nAllow: /\nSitemap: https://${host}/sitemap.xml`, statusByPath: Record<string, number> = {}): PinnedFetchTransport {
   const product = `<script type="application/ld+json">${JSON.stringify({
     "@context": "https://schema.org", "@type": "Product", name: "Blue wool jacket",
     image: `https://${host}/jacket.jpg`, brand: { "@type": "Brand", name: "Example" },
@@ -18,12 +18,14 @@ function retailerTransport(host = "shop.example", robots = `User-agent: *\nAllow
         async read(buffer) {
           if (!body) {
             const path = request.split(" ")[1] || "/";
+            const status = statusByPath[path] || 200;
             const content = path === "/robots.txt" ? robots
               : path === "/sitemap.xml" ? `<urlset><url><loc>https://${host}/products/blue-wool-jacket</loc></url></urlset>`
                 : product;
             const type = path === "/robots.txt" ? "text/plain" : path === "/sitemap.xml" ? "application/xml" : "text/html";
             const payload = new TextEncoder().encode(content);
-            const headers = new TextEncoder().encode(`HTTP/1.1 200 OK\r\nContent-Type: ${type}\r\nContent-Length: ${payload.length}\r\n\r\n`);
+            const statusText = status === 429 ? "Too Many Requests" : status === 503 ? "Service Unavailable" : "OK";
+            const headers = new TextEncoder().encode(`HTTP/1.1 ${status} ${statusText}\r\nContent-Type: ${type}\r\nContent-Length: ${payload.length}\r\n\r\n`);
             body = new Uint8Array(headers.length + payload.length);
             body.set(headers); body.set(payload, headers.length);
           }
@@ -107,5 +109,13 @@ describe("bounded retailer catalog inspection", () => {
       retailerTransport("blocked.example", "User-agent: *\nDisallow: /products\nAllow: /sitemap.xml\nSitemap: https://blocked.example/sitemap.xml"),
     );
     expect(result).toMatchObject({ status: "restricted", errorCode: "robots_restricted" });
+  });
+
+  it("classifies robots rate limits as temporary and avoids calling them product-page restrictions", async () => {
+    const result = await inspectRetailerCatalog(
+      "limited.example", async (_host, type) => type === "A" ? ["93.184.216.34"] : [],
+      retailerTransport("limited.example", "", { "/robots.txt": 429 }),
+    );
+    expect(result).toMatchObject({ status: "temporarily_unavailable", errorCode: "robots_http_429", httpStatus: 429 });
   });
 });

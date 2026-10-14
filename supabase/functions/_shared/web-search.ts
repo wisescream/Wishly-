@@ -29,6 +29,9 @@ export function isRetailerUrl(value: string): boolean {
     const url = new URL(value);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return false;
     const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    const editorialSubdomain = /^(?:blog|magazine|news|journal|press|stories|help|support|community)\./i.test(host);
+    const editorialPath = /(?:^|\/)(?:blog|magazine|news|journal|tag|tags|category|categories|editorial|article|articles)(?:\/|$)/i.test(url.pathname);
+    if (editorialSubdomain || editorialPath) return false;
     return !/^(google|bing|yahoo|duckduckgo|facebook|instagram|tiktok|youtube|reddit|wikipedia|pinterest|tomsguide|techradar|cnet|theverge|wired|nytimes|forbes|engadget|digitaltrends)\./.test(host);
   } catch { return false; }
 }

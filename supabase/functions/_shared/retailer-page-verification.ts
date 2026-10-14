@@ -1,9 +1,9 @@
-import { parseProductMetadata } from "./product-metadata.ts";
+import { isProductPriceCurrent, parseProductMetadata } from "./product-metadata.ts";
 import { fetchPinnedProductPage, type PinnedFetchTransport } from "./pinned-fetch.ts";
 import type { DnsResolver } from "./url-security.ts";
 import { getTitleCoverage } from "./title-match.ts";
 import { compareProductConditions, normalizeProductCondition } from "./product-condition.ts";
-import { getRetailerDomain, retailerPageRobotsAllowed } from "./retailer-discovery.ts";
+import { getRetailerDomain, retailerPageRobotsDecision } from "./retailer-discovery.ts";
 import { confirmsGenderVariant, getGenderVariant } from "./gender-variant.ts";
 
 export interface RetailerPageSeed {
@@ -36,10 +36,15 @@ export interface VerifiedRetailerOffer {
   price: number;
   currency: string;
   url: string;
+  canonical_url: string | null;
+  product_gtin: string | null;
+  product_sku: string | null;
+  product_model_number: string | null;
+  gender_category: string | null;
   original_price: number | null;
   discount_percent: number | null;
-  shipping_cost: number;
-  taxes: number;
+  shipping_cost: number | null;
+  taxes: number | null;
   total_price: null;
   shipping_known: false;
   taxes_known: false;
@@ -48,6 +53,9 @@ export interface VerifiedRetailerOffer {
   availability: string;
   source: "retailer_page";
   last_verified_at: string;
+  verification_status: "verified" | "unavailable";
+  verification_reason_code: string;
+  verification_evidence: Record<string, unknown>;
 }
 
 export interface RetailerPageVerificationAttempt {
@@ -214,17 +222,27 @@ export async function inspectAndVerifyRetailerProductPage(
 ): Promise<RetailerPageVerificationAttempt> {
   const domain = getRetailerDomain(url);
   if (!domain) return { offer: null, finalUrl: url, status: null, errorCode: "invalid_url", evidence: { hasPrice: false, hasImage: false } };
-  if (!await retailerPageRobotsAllowed(url, resolveDns, transport)) {
-    return { offer: null, finalUrl: url, status: null, errorCode: "robots_restricted", evidence: { hasPrice: false, hasImage: false } };
+  const robotsDecision = await retailerPageRobotsDecision(url, resolveDns, transport);
+  if (robotsDecision !== "allowed") {
+    return { offer: null, finalUrl: url, status: null, errorCode: robotsDecision === "restricted" ? "robots_restricted" : "robots_unavailable", evidence: { hasPrice: false, hasImage: false } };
   }
   let page;
+  let redirectRobotsUnavailable = false;
   try {
     page = await fetchPinnedProductPage(url, resolveDns, transport, {
       maxBodyBytes: 1.5 * 1024 * 1024, timeoutMs: 5_000, maxRedirects: 3,
-      onRedirect: (target) => retailerPageRobotsAllowed(target.href, resolveDns, transport),
+      onRedirect: async (target) => {
+        const access = await retailerPageRobotsDecision(target.href, resolveDns, transport);
+        if (access === "temporarily_unavailable") redirectRobotsUnavailable = true;
+        return access === "allowed";
+      },
     });
-  } catch {
-    return { offer: null, finalUrl: url, status: null, errorCode: "fetch_failed", evidence: { hasPrice: false, hasImage: false } };
+  } catch (error) {
+    const errorCode = redirectRobotsUnavailable ? "robots_unavailable" : error instanceof Error && error.message.toLowerCase().includes("robots.txt") ? "robots_restricted" : "fetch_failed";
+    return { offer: null, finalUrl: url, status: null, errorCode, evidence: { hasPrice: false, hasImage: false } };
+  }
+  if (getRetailerDomain(page.finalUrl.href) !== domain) {
+    return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "cross_domain_product_redirect", evidence: { hasPrice: false, hasImage: false } };
   }
   if (page.status < 200 || page.status >= 300) {
     return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: `http_${page.status}`, evidence: { hasPrice: false, hasImage: false } };
@@ -232,7 +250,7 @@ export async function inspectAndVerifyRetailerProductPage(
   if (page.truncated) return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "response_truncated", evidence: { hasPrice: false, hasImage: false } };
   const contentType = page.headers.get("content-type")?.toLowerCase() || "";
   if (!contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
-    return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "not_html", evidence: { hasPrice: false, hasImage: false } };
+    return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "unsupported_format", evidence: { hasPrice: false, hasImage: false } };
   }
   const metadata = parseProductMetadata(new TextDecoder().decode(page.body), page.finalUrl.href);
   const evidence = { ...(metadata.title ? { title: metadata.title.slice(0, 300) } : {}), hasPrice: metadata.price != null, ...(metadata.currency ? { currency: metadata.currency } : {}), hasImage: Boolean(metadata.image_url) };
@@ -240,8 +258,11 @@ export async function inspectAndVerifyRetailerProductPage(
   if (!metadata.price || !metadata.currency || metadata.price_conflict) {
     return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "product_price_or_currency_missing", evidence };
   }
+  if (!isProductPriceCurrent(metadata.price, metadata.price_valid_until, Date.parse(now))) {
+    return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "stale_price", evidence: { ...evidence, price_valid_until: metadata.price_valid_until } };
+  }
   const identityMatch = assessRetailerPageIdentity(seed, metadata);
-  if (!identityMatch) return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "product_identity_not_confirmed", evidence };
+  if (!identityMatch || identityMatch.confidence < 0.9 || identityMatch.matchType.includes("unconfirmed")) return { offer: null, finalUrl: page.finalUrl.href, status: page.status, errorCode: "product_identity_not_confirmed", evidence };
 
   const host = page.finalUrl.hostname.replace(/^www\./i, "");
   const offer: VerifiedRetailerOffer = {
@@ -261,10 +282,15 @@ export async function inspectAndVerifyRetailerProductPage(
     price: metadata.price!,
     currency: metadata.currency,
     url: page.finalUrl.href,
+    canonical_url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : null,
+    product_gtin: metadata.gtin,
+    product_sku: metadata.sku,
+    product_model_number: metadata.model_number,
+    gender_category: getGenderVariant([metadata.category || "", metadata.title || ""].join(" ")),
     original_price: metadata.original_price,
     discount_percent: metadata.discount_percent,
-    shipping_cost: 0,
-    taxes: 0,
+    shipping_cost: null,
+    taxes: null,
     total_price: null,
     shipping_known: false,
     taxes_known: false,
@@ -273,6 +299,9 @@ export async function inspectAndVerifyRetailerProductPage(
     availability: metadata.availability,
     source: "retailer_page",
     last_verified_at: now,
+    verification_status: metadata.availability === "out_of_stock" ? "unavailable" : "verified",
+    verification_reason_code: metadata.availability === "out_of_stock" ? "retailer_page_out_of_stock" : "retailer_page_identity_price_currency_confirmed",
+    verification_evidence: { ...evidence, model_number: metadata.model_number, sku: metadata.sku, gtin: metadata.gtin, variant: metadata.variant_name, canonical_url: metadata.canonical_url, price_valid_until: metadata.price_valid_until, availability: metadata.availability },
   };
   return { offer, finalUrl: page.finalUrl.href, status: page.status, errorCode: null, evidence };
 }

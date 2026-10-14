@@ -1,11 +1,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { parseEstimatedUnitCost, recordProviderMetric } from "../_shared/provider-metrics.ts";
+import { parseEstimatedUnitCost, recordProviderMetric, type ProviderErrorCode } from "../_shared/provider-metrics.ts";
 import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
-import { classifySerpApiFailure, describeSerpApiHttpFailure, parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
-import { parseSearXNGResponse, searchSearXNG, toSearXNGCandidates, type SearXNGResult } from "../_shared/searxng.ts";
+import { buildSerpApiShoppingRequest, classifySerpApiFailure, describeSerpApiHttpFailure, parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
+import { classifySearXNGFailure, parseSearXNGResponse, searchSearXNG, toSearXNGCandidates, type SearXNGResult } from "../_shared/searxng.ts";
 import { classifySeller, getRetailerDomain } from "../_shared/retailer-discovery.ts";
+import { providerBudgetState } from "../_shared/provider-budget.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -58,18 +59,20 @@ serve(async (req) => {
       if (!cached) {
         const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SEARXNG_DAILY_SEARCH_LIMIT") || "20", 10) || 20));
         const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "searxng", p_daily_limit: dailyLimit });
-        if (budgetError) fallbackError = "The SearXNG daily search budget could not be checked.";
-        else if (reserved !== true) {
+        const budgetState = providerBudgetState(reserved, budgetError);
+        if (budgetState === "unavailable") fallbackError = "The SearXNG daily search budget could not be checked.";
+        else if (budgetState === "exhausted") {
           fallbackError = "Wishly reached its configured daily SearXNG search budget. Try again tomorrow.";
           await recordProviderMetric(admin, { provider: "searxng", surface: "interactive", outcome: "budget_exhausted", marketCountry: market.country });
         } else {
           const startedAt = Date.now();
           let statusCode: number | null = null;
+          let searxErrorCode: ProviderErrorCode | null = null;
           let outcome: "success" | "error" = "error";
           try {
             const result = await searchSearXNG(searxngBaseUrl, query, market.hl);
             statusCode = result.response.status;
-            if (!result.response.ok) fallbackError = `SearXNG returned HTTP ${result.response.status}.`;
+            if (!result.response.ok) { searxErrorCode = classifySearXNGFailure(result.response.status); fallbackError = `SearXNG returned HTTP ${result.response.status}.`; }
             else {
               leads = result.results;
               outcome = "success";
@@ -80,10 +83,11 @@ serve(async (req) => {
             }
           } catch {
             fallbackError = "The configured SearXNG instance could not be reached.";
+            searxErrorCode = "network_error";
           } finally {
             await recordProviderMetric(admin, {
               provider: "searxng", surface: "interactive", outcome, durationMs: Date.now() - startedAt,
-              resultCount: leads.length, statusCode,
+              resultCount: leads.length, statusCode, errorCode: searxErrorCode,
               unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SEARXNG_ESTIMATED_COST_PER_SEARCH_USD")),
               marketCountry: market.country,
             });
@@ -110,21 +114,19 @@ serve(async (req) => {
     }
     const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SERPAPI_DAILY_SEARCH_LIMIT") || "31", 10) || 31));
     const { data: providerRequestReserved, error: providerBudgetError } = await admin.rpc("reserve_provider_search", { p_provider: "serpapi", p_daily_limit: dailyLimit });
-    if (providerBudgetError) {
+    const providerBudget = providerBudgetState(providerRequestReserved, providerBudgetError);
+    if (providerBudget === "unavailable") {
       const fallback = await runSearXNGFallback("Shopping search budget could not be checked.");
       return fallback || json({ error: "Shopping search budget could not be checked. Try again shortly." }, 503);
     }
-    if (providerRequestReserved !== true) {
+    if (providerBudget === "exhausted") {
       const fallback = await runSearXNGFallback("Wishly reached its configured daily Google Shopping search budget.");
       return fallback || json({ configured: true, candidates: [], offers: [], error: "Wishly reached its configured daily Shopping search budget. Try again tomorrow." }, 429);
     }
 
-    const url = new URL("https://serpapi.com/search.json");
-    url.searchParams.set("engine", "google_shopping");
-    url.searchParams.set("q", query.trim());
-    url.searchParams.set("gl", market.gl);
-    url.searchParams.set("hl", market.hl);
-    url.searchParams.set("api_key", key);
+    const request = buildSerpApiShoppingRequest({ query, gl: market.gl, hl: market.hl, apiKey: key });
+    if (request.error) return json({ configured: true, candidates: [], offers: [], error: "Shopping search request parameters are invalid." }, 400);
+    const url = request.url;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 25000);
     let response: Response;

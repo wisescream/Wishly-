@@ -21,6 +21,8 @@ export interface AlertOffer {
   availability: string | null;
   last_verified_at: string | null;
   total_is_estimated: boolean | null;
+  shipping_known?: boolean | null;
+  taxes_known?: boolean | null;
   product_match_confidence: number | null;
   created_at?: string | null;
 }
@@ -49,7 +51,13 @@ export function getAlertObservation(item: AlertItem, offer: AlertOffer, now = Da
   const newCheaper = item.alert_on_new_cheaper_offer && belowOriginal && Number.isFinite(createdAt) && createdAt <= now && now - createdAt <= 24 * 60 * 60 * 1000;
   if (!target && !percentage && !anyLower && !newCheaper) return null;
   const reason = target ? `target:${item.target_price}` : percentage ? `drop:${item.price_drop_percent}` : newCheaper ? "new-cheaper-offer" : "lower-than-original";
-  return { price, completeTotal, target, percentage, newCheaper, reason };
+  const missingCosts = completeTotal ? [] : [
+    ...(offer.shipping_known === true ? [] : ["shipping"]),
+    ...(offer.taxes_known === true ? [] : ["taxes"]),
+    ...(offer.availability === "unknown" ? ["availability"] : []),
+    "final checkout total",
+  ];
+  return { price, completeTotal, target, percentage, newCheaper, reason, missingCosts: [...new Set(missingCosts)] };
 }
 
 export function isBackInStockAlert(item: AlertItem, offer: AlertOffer, previousAvailability: string | null, now = Date.now()): boolean {

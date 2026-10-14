@@ -47,3 +47,15 @@ export function buildProductSearchQueries(identity: ProductSearchIdentity, maxQu
     return [query];
   }).slice(0, limit);
 }
+
+/** Preserve identifier searches while adding one localized market query for Moroccan discovery. */
+export function buildMarketProductSearchQueries(identity: ProductSearchIdentity, country: string | null | undefined, maxQueries = 3): string[] {
+  const base = buildProductSearchQueries(identity, 3);
+  if (String(country || "").toUpperCase() !== "MA" || !base.length) return base.slice(0, maxQueries);
+  const titleIdentity = [identity.brand, identity.title, identity.modelNumber, identity.variant]
+    .filter((value): value is string => typeof value === "string" && value.trim())
+    .join(" ").replace(/\s+/g, " ").trim();
+  const localized = titleIdentity ? `${titleIdentity.slice(0, 195)} Maroc Morocco prix boutique en ligne`.slice(0, 240) : "";
+  const ordered = [...new Set([base[0], localized, ...base.slice(1, -1)].filter(Boolean))];
+  return ordered.slice(0, Math.max(0, Math.min(10, Math.floor(maxQueries))));
+}

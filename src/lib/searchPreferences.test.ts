@@ -14,12 +14,14 @@ function memoryStorage(): Storage {
 }
 
 describe('expanded retailer-search preference', () => {
-  it('is off by default and persists explicit opt-in per account', () => {
+  it('is on by default and persists explicit opt-out per account', () => {
     const storage = memoryStorage();
+    expect(readExpandedRetailerSearchPreference('user-a', storage)).toBe(true);
+    expect(writeExpandedRetailerSearchPreference('user-a', false, storage)).toBe(true);
     expect(readExpandedRetailerSearchPreference('user-a', storage)).toBe(false);
     expect(writeExpandedRetailerSearchPreference('user-a', true, storage)).toBe(true);
     expect(readExpandedRetailerSearchPreference('user-a', storage)).toBe(true);
-    expect(readExpandedRetailerSearchPreference('user-b', storage)).toBe(false);
+    expect(readExpandedRetailerSearchPreference('user-b', storage)).toBe(true);
   });
 
   it('persists opt-out and safely handles unavailable storage', () => {
@@ -27,7 +29,7 @@ describe('expanded retailer-search preference', () => {
     writeExpandedRetailerSearchPreference('user-a', true, storage);
     writeExpandedRetailerSearchPreference('user-a', false, storage);
     expect(readExpandedRetailerSearchPreference('user-a', storage)).toBe(false);
-    expect(readExpandedRetailerSearchPreference('user-a', undefined)).toBe(false);
+    expect(readExpandedRetailerSearchPreference('user-a', undefined)).toBe(true);
     expect(writeExpandedRetailerSearchPreference('user-a', true, undefined)).toBe(false);
   });
 });

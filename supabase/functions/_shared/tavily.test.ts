@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildRetailerQueries, parseTavilyResponse, searchTavily } from "./tavily.ts";
+import { buildRetailerQueries, classifyTavilyFailure, parseTavilyResponse, searchTavily } from "./tavily.ts";
+import { searchSearXNG } from "./searxng.ts";
 
 describe("Tavily discovery input normalization", () => {
+  it("classifies provider limits and billing responses without retrying them", () => {
+    expect(classifyTavilyFailure(429)).toBe("rate_limited");
+    expect(classifyTavilyFailure(402)).toBe("insufficient_credits");
+    expect(classifyTavilyFailure(503)).toBe("provider_unavailable");
+  });
   it("creates bounded market-aware clothing queries", () => {
     const queries = buildRetailerQueries({ title: "Pegasus 41", brand: "Nike", category: "sneakers", country: "MA", language: "fr" });
     expect(queries).toHaveLength(3);
@@ -74,5 +80,21 @@ describe("Tavily discovery input normalization", () => {
     expect(result.response.status).toBe(429);
     expect(result.data.results).toEqual([]);
     expect(result.data.error).toContain("429");
+  });
+
+  it("keeps a successful provider usable after another source fails", async () => {
+    const searx = await searchSearXNG("https://fallback-test.example", "product", "en", async () => new Response("limited", { status: 429 }), { sleep: async () => {}, random: () => 0 });
+    const tavilyFetcher = vi.fn(async () => new Response(JSON.stringify({ results: [{ title: "Listing", url: "https://retailer.example/item", content: "" }] }), { status: 200 }));
+    expect(searx.response.ok).toBe(false);
+    const tavily = await searchTavily("key", "product", tavilyFetcher as typeof fetch);
+    expect(tavily.response.ok).toBe(true);
+    expect(tavily.data.results).toHaveLength(1);
+  });
+
+  it("aborts timed out requests", async () => {
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }));
+    await expect(searchTavily("key", "product", fetcher as typeof fetch, [], 1)).rejects.toMatchObject({ name: "AbortError" });
   });
 });

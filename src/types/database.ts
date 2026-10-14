@@ -492,8 +492,8 @@ export interface Database {
           original_price: number | null;
           discount_percent: number | null;
           currency: string;
-          shipping_cost: number;
-          taxes: number;
+          shipping_cost: number | null;
+          taxes: number | null;
           total_price: number | null;
           condition: string;
           availability: string;
@@ -501,7 +501,8 @@ export interface Database {
           source: string;
           url: string;
           affiliate_url: string | null;
-          last_verified_at: string;
+          last_verified_at: string | null;
+          last_checked_at: string | null;
           created_at: string;
           updated_at: string;
           shipping_known: boolean;
@@ -524,6 +525,16 @@ export interface Database {
           product_match_confidence: number | null;
           match_type: string | null;
           is_verified: boolean;
+          verification_status: 'unverified' | 'verified' | 'unavailable' | 'stale' | 'rejected' | 'failed';
+          last_checked_at?: string | null;
+          verification_reason_code: string | null;
+          verification_evidence: Json;
+          source_url: string | null;
+          canonical_url: string | null;
+          product_gtin: string | null;
+          product_sku: string | null;
+          product_model_number: string | null;
+          gender_category: string | null;
           seller_type: 'official' | 'authorized' | 'independent' | 'marketplace' | 'reseller' | 'outlet' | 'second_hand' | 'unknown';
         };
         Insert: {
@@ -536,8 +547,8 @@ export interface Database {
           original_price?: number | null;
           discount_percent?: number | null;
           currency?: string;
-          shipping_cost?: number;
-          taxes?: number;
+          shipping_cost?: number | null;
+          taxes?: number | null;
           total_price?: number | null;
           condition?: string;
           availability?: string;
@@ -545,7 +556,7 @@ export interface Database {
           source?: string;
           url: string;
           affiliate_url?: string | null;
-          last_verified_at?: string;
+          last_verified_at?: string | null;
           created_at?: string;
           updated_at?: string;
           shipping_known?: boolean;
@@ -568,6 +579,16 @@ export interface Database {
           product_match_confidence?: number | null;
           match_type?: string | null;
           is_verified?: boolean;
+          verification_status?: 'unverified' | 'verified' | 'unavailable' | 'stale' | 'rejected' | 'failed';
+          last_checked_at?: string | null;
+          verification_reason_code?: string | null;
+          verification_evidence?: Json;
+          source_url?: string | null;
+          canonical_url?: string | null;
+          product_gtin?: string | null;
+          product_sku?: string | null;
+          product_model_number?: string | null;
+          gender_category?: string | null;
           seller_type?: 'official' | 'authorized' | 'independent' | 'marketplace' | 'reseller' | 'outlet' | 'second_hand' | 'unknown';
         };
         Update: {
@@ -575,8 +596,8 @@ export interface Database {
           original_price?: number | null;
           discount_percent?: number | null;
           currency?: string;
-          shipping_cost?: number;
-          taxes?: number;
+          shipping_cost?: number | null;
+          taxes?: number | null;
           total_price?: number | null;
           condition?: string;
           availability?: string;
@@ -584,7 +605,8 @@ export interface Database {
           source?: string;
           url?: string;
           affiliate_url?: string | null;
-          last_verified_at?: string;
+          last_verified_at?: string | null;
+          last_checked_at?: string | null;
           updated_at?: string;
           shipping_known?: boolean;
           taxes_known?: boolean;
@@ -606,6 +628,15 @@ export interface Database {
           product_match_confidence?: number | null;
           match_type?: string | null;
           is_verified?: boolean;
+          verification_status?: 'unverified' | 'verified' | 'unavailable' | 'stale' | 'rejected' | 'failed';
+          verification_reason_code?: string | null;
+          verification_evidence?: Json;
+          source_url?: string | null;
+          canonical_url?: string | null;
+          product_gtin?: string | null;
+          product_sku?: string | null;
+          product_model_number?: string | null;
+          gender_category?: string | null;
           seller_type?: 'official' | 'authorized' | 'independent' | 'marketplace' | 'reseller' | 'outlet' | 'second_hand' | 'unknown';
         };
         Relationships: [];
@@ -926,7 +957,8 @@ export interface FetchedOffer {
   affiliate_url?: string;
   source?: string;
   seller_type?: 'official' | 'authorized' | 'independent' | 'marketplace' | 'reseller' | 'outlet' | 'second_hand' | 'unknown';
-  last_verified_at?: string;
+          last_verified_at?: string | null;
+          last_checked_at?: string | null;
 }
 
 export interface FetchedProduct {

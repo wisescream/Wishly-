@@ -7,16 +7,22 @@ import { confirmsGenderVariant, getGenderVariant } from "../_shared/gender-varia
 import { calculateTotalPurchaseCost, parseShippingEstimate } from "../_shared/offer-cost.ts";
 import { addOfferCurrencyConversions } from "../_shared/exchange-rate.ts";
 import { parseEstimatedUnitCost, parseOpenRouterWebSearchCount, recordProviderMetric, type ProviderErrorCode } from "../_shared/provider-metrics.ts";
-import { classifySerpApiFailure, parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
+import { buildSerpApiShoppingRequest, classifySerpApiFailure, parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
+import { classifyOpenRouterFailure, describeOpenRouterFailure, requestOpenRouter } from "../_shared/openrouter.ts";
+import { providerBudgetState } from "../_shared/provider-budget.ts";
 import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
-import { buildProductSearchQueries } from "../_shared/product-search.ts";
+import { buildMarketProductSearchQueries } from "../_shared/product-search.ts";
 import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/research-persistence.ts";
 import { findProductVariantColor, inspectAndVerifyRetailerProductPage } from "../_shared/retailer-page-verification.ts";
-import { classifySeller, getRetailerDomain, inferRetailerCountry } from "../_shared/retailer-discovery.ts";
+import { classifyRetailerFailure, classifySeller, getRetailerDomain, inferRetailerCountry } from "../_shared/retailer-discovery.ts";
 import { inspectRetailerCatalog } from "../_shared/retailer-catalog-inspection.ts";
+import { primaryRetailerValidationMarket } from "../_shared/retailer-market-priority.ts";
+import { preserveExistingVerifiedOffers, withOfferVerificationEvidence } from "../_shared/offer-verification.ts";
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
+import { deriveResearchOutcome } from "../_shared/research-outcome.ts";
+import { hasScheduledSearchProvider } from "../_shared/scheduled-provider-config.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
-import { buildRetailerQueries, parseTavilyResponse, searchTavily } from "../_shared/tavily.ts";
+import { buildRetailerQueries, classifyTavilyFailure, parseTavilyResponse, searchTavily } from "../_shared/tavily.ts";
 
 const corsHeaders = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-price-check-secret" };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -49,6 +55,7 @@ serve(async (req) => {
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     const apiKey = Deno.env.get("SERPAPI_KEY");
     const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
+    const openRouterEnabled = Deno.env.get("OPENROUTER_ALLOW_SCHEDULED_SEARCH") === "true" && Boolean(openRouterKey);
     const tavilyKey = Deno.env.get("TAVILY_API_KEY");
     const tavilyEnabled = Boolean(tavilyKey);
     if (!url || !serviceKey) return json({ error: "Service is not configured." }, 503);
@@ -57,7 +64,7 @@ serve(async (req) => {
     if (!token || token.length > 256) return json({ error: "Unauthorized scheduled invocation." }, 401);
     const { data: authorized, error: authError } = await admin.rpc("is_valid_price_check_secret", { p_candidate: token });
     if (authError || authorized !== true) return json({ error: "Unauthorized scheduled invocation." }, 401);
-    if (!apiKey && !openRouterKey && !tavilyEnabled) {
+    if (!hasScheduledSearchProvider({ serpApiKey: apiKey, openRouterKey, openRouterEnabled, tavilyKey })) {
       const retryAt = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
       await admin.from("items").update({
         next_offer_search_at: retryAt,
@@ -70,31 +77,29 @@ serve(async (req) => {
     let retailerSeedsInspected = 0;
     let retailerSeedsValidated = 0;
 
-    const now = new Date();
-    const { data: due, error } = await admin.from("items")
-      .select("id,wishlist_id,title,brand,model_number,gtin,variant_label,condition,category,product_id,variant_id,currency,last_offer_search_at,next_offer_search_at,offer_search_attempts,target_price,priority,status")
-      .eq("status", "wanted").or(`next_offer_search_at.is.null,next_offer_search_at.lte.${now.toISOString()}`)
-      .order("next_offer_search_at", { ascending: true, nullsFirst: true })
-      .order("target_price", { ascending: true, nullsFirst: false })
-      .order("priority", { ascending: false })
-      .order("created_at", { ascending: true })
-      .limit(24);
+    const { data: claimedRows, error: claimError } = await admin.rpc("claim_due_offer_research_items", { p_limit: 24, p_lease_minutes: 45 });
+    if (claimError) throw claimError;
+    const dueItemIds = (claimedRows || []).map((row: any) => typeof row === "string" ? row : row.id).filter(Boolean);
+    const { data: due, error } = dueItemIds.length
+      ? await admin.from("items")
+        .select("id,wishlist_id,title,brand,model_number,gtin,variant_label,condition,category,product_id,variant_id,currency,last_offer_search_at,next_offer_search_at,offer_search_attempts,target_price,priority,status,created_at")
+        .in("id", dueItemIds)
+        .order("next_offer_search_at", { ascending: true, nullsFirst: true })
+        .order("target_price", { ascending: true, nullsFirst: false })
+        .order("priority", { ascending: false })
+        .order("created_at", { ascending: true })
+      : { data: [], error: null };
     if (error) throw error;
-    const dueItemIds = (due || []).map((item) => item.id);
-    if (dueItemIds.length) {
-      const { error: statusError } = await admin.from("items")
-        .update({ enrichment_status: "searching_offers", enrichment_error: null })
-        .in("id", dueItemIds).eq("status", "wanted");
-      if (statusError) console.error(JSON.stringify({ event: "research_status_update_failed", item_count: dueItemIds.length }));
-    }
     const preferenceByWishlist = new Map<string, { currency: string | null; country: string | null; language: string | null }>();
     const wishlistIds = [...new Set((due || []).map((item) => item.wishlist_id))];
     if (wishlistIds.length) {
-      const { data: wishlists } = await admin.from("wishlists").select("id,owner_id").in("id", wishlistIds);
+      const { data: wishlists, error: wishlistError } = await admin.from("wishlists").select("id,owner_id").in("id", wishlistIds);
+      if (wishlistError) throw wishlistError;
       const ownerIds = [...new Set((wishlists || []).map((wishlist) => wishlist.owner_id))];
       let profiles: Array<{ id: string; currency: string; country: string; language: string }> = [];
       if (ownerIds.length) {
-        const { data: rows } = await admin.from("profiles").select("id,currency,country,language").in("id", ownerIds);
+        const { data: rows, error: profileError } = await admin.from("profiles").select("id,currency,country,language").in("id", ownerIds);
+        if (profileError) throw profileError;
         profiles = rows || [];
       }
       const preferencesByOwner = new Map(profiles.map((profile) => [profile.id, { currency: profile.currency, country: profile.country, language: profile.language }]));
@@ -108,6 +113,7 @@ serve(async (req) => {
     let tavilySearches = 0;
     let providerFailures = 0;
     let offersSaved = 0;
+    let persistenceFailures = 0;
     let shoppingRowsReceived = 0;
     let shoppingCandidateEvaluations = 0;
     let shoppingCandidatesAccepted = 0;
@@ -140,42 +146,55 @@ serve(async (req) => {
       groups.set(signature, list);
     }
 
+    const workGroups = [...groups.values()];
+    const selectedItems = workGroups[0] || [];
+    const selectedIds = new Set(selectedItems.map((item) => item.id));
+    const unselectedIds = dueItemIds.filter((id) => !selectedIds.has(id));
+    if (unselectedIds.length) {
+      const { error: releaseError } = await admin.from("items").update({ offer_research_lease_until: null })
+        .in("id", unselectedIds);
+      if (releaseError) console.error(JSON.stringify({ event: "offer_research_lease_release_failed", item_count: unselectedIds.length, error_code: releaseError.code || null }));
+    }
+    if (selectedItems.length) {
+      const { error: statusError } = await admin.from("items").update({ enrichment_status: "searching_offers", enrichment_error: null })
+        .in("id", [...selectedIds]).eq("status", "wanted");
+      if (statusError) console.error(JSON.stringify({ event: "research_status_update_failed", item_count: selectedItems.length, error_code: statusError.code || null }));
+    }
+
     // Bound provider use per schedule tick and share one query across identical tracked products.
     // One product identity per tick keeps the three-query fallback within the
     // scheduled request timeout. The frequent schedule drains the due queue.
-    for (const items of [...groups.values()].slice(0, 1)) {
+    for (const items of workGroups.slice(0, 1)) {
       const seed = items[0];
       const seedPreference = preferenceByWishlist.get(seed.wishlist_id);
       const targetCountry = String(seedPreference?.country || "").toUpperCase();
       const market = resolveSearchMarket(targetCountry, seed.currency, seedPreference?.language);
       const checkedAt = new Date().toISOString();
       const seedGtin = digits(seed.gtin);
-      const queries = buildProductSearchQueries({
+      const queries = buildMarketProductSearchQueries({
         gtin: seedGtin,
         brand: seed.brand,
         modelNumber: seed.model_number,
         title: seed.title,
         variant: seed.variant_label,
-      });
+      }, targetCountry);
       const shoppingRows: any[] = [];
       let failedSearches = 0;
       let searchBudgetReached = false;
       for (const query of apiKey ? [...new Set(queries)].slice(0, 3) : []) {
+        const request = buildSerpApiShoppingRequest({ query, gl: market.gl, hl: market.hl, apiKey: apiKey! });
+        if (request.error) { failedSearches++; providerFailures++; break; }
         const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SERPAPI_DAILY_SEARCH_LIMIT") || "31", 10) || 31));
         const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "serpapi", p_daily_limit: dailyLimit });
-        if (budgetError) throw budgetError;
-        if (reserved !== true) {
+        const budgetState = providerBudgetState(reserved, budgetError);
+        if (budgetState === "unavailable") { failedSearches++; providerFailures++; break; }
+        if (budgetState === "exhausted") {
           searchBudgetReached = true;
           dailyBudgetReached = true;
           await recordProviderMetric(admin, { provider: "serpapi", surface: "scheduled", outcome: "budget_exhausted", marketCountry: targetCountry });
           break;
         }
-        const search = new URL("https://serpapi.com/search.json");
-        search.searchParams.set("engine", "google_shopping");
-        search.searchParams.set("q", query);
-        search.searchParams.set("gl", market.gl);
-        search.searchParams.set("hl", market.hl);
-        search.searchParams.set("api_key", apiKey!);
+        const search = request.url;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 25_000);
         const searchStartedAt = Date.now();
@@ -205,6 +224,7 @@ serve(async (req) => {
             provider: "serpapi", surface: "scheduled", outcome, durationMs: Date.now() - searchStartedAt,
             statusCode, errorCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry,
           });
+          if ([400, 401, 402, 403, 429].includes(statusCode)) break;
           continue;
         }
         try {
@@ -227,7 +247,7 @@ serve(async (req) => {
           resultCount, statusCode, errorCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SERPAPI_ESTIMATED_COST_PER_SEARCH_USD")),
           marketCountry: targetCountry,
         });
-        if (exactIdentifierFound) break;
+        if (exactIdentifierFound || [400, 401, 402, 403, 429].includes(statusCode || 0)) break;
       }
       const hasStrongShoppingMatch = items.some((item) => shoppingRows.some((row: any) => {
         const title = String(row.title || "");
@@ -260,12 +280,14 @@ serve(async (req) => {
       let citationProvider: "openrouter_web_search" | "tavily_web_search" = "openrouter_web_search";
       let citationQueryHash: string | null = null;
       let webSearchError: string | null = null;
-      if (!hasStrongShoppingMatch && openRouterKey && Deno.env.get("OPENROUTER_ALLOW_SCHEDULED_SEARCH") === "true") {
+      if (!hasStrongShoppingMatch && openRouterEnabled) {
         const openRouterLimit = Deno.env.get("OPENROUTER_DAILY_REQUEST_LIMIT") || Deno.env.get("OPENROUTER_DAILY_SEARCH_LIMIT") || "8";
         const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(openRouterLimit, 10) || 8));
         const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "openrouter", p_daily_limit: dailyLimit });
-        if (budgetError) throw budgetError;
-        if (reserved !== true) {
+        const budgetState = providerBudgetState(reserved, budgetError);
+        if (budgetState === "unavailable") {
+          webSearchError = "OpenRouter budget could not be checked; Tavily fallback may still run.";
+        } else if (budgetState === "exhausted") {
           searchBudgetReached = true;
           dailyBudgetReached = true;
           webSearchError = "Wishly reached its configured daily web-search budget. Research will retry tomorrow.";
@@ -277,14 +299,9 @@ serve(async (req) => {
         let webResultCount = 0;
         let webSearchCount: number | null = null;
         let webOutcome: "success" | "error" = "error";
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 20_000);
+        let webErrorCode: ProviderErrorCode | null = null;
         try {
-          const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${openRouterKey}`, "Content-Type": "application/json" },
-            signal: controller.signal,
-            body: JSON.stringify({
+          const response = await requestOpenRouter(openRouterKey, {
               model: Deno.env.get("OPENROUTER_MODEL") || "openai/gpt-4o-mini",
               tools: [{ type: "openrouter:web_search", parameters: { engine: "exa", max_results: 6, max_total_results: 8, max_uses: 2, search_context_size: "low" } }],
               max_tool_calls: 2,
@@ -292,13 +309,13 @@ serve(async (req) => {
                 { role: "system", content: "Search for direct retailer pages for the exact product below. Use web search. Do not invent prices, currency, availability, condition, shipping, or variants. Return source citations; the application will validate visible product identifiers and price text." },
                 { role: "user", content: `Find direct retailer listings for this exact product and requested variant: ${JSON.stringify({ brand: seed.brand, model: seed.model_number, gtin: seed.gtin, title: seed.title, variant: seed.variant_label }).slice(0, 1000)}.` },
               ],
-            }),
           });
           webStatusCode = response.status;
           if (!response.ok) {
             failedSearches++;
             providerFailures++;
-            webSearchError = response.status === 401 ? "OpenRouter rejected its API key; check OPENROUTER_API_KEY." : response.status === 402 ? "OpenRouter has insufficient credits for web search." : "OpenRouter web search is temporarily unavailable.";
+            webErrorCode = classifyOpenRouterFailure(response.status, await response.text()) as ProviderErrorCode;
+            webSearchError = describeOpenRouterFailure(webErrorCode as Parameters<typeof describeOpenRouterFailure>[0]);
           } else {
             const result = await response.json();
             webSearchCount = parseOpenRouterWebSearchCount(result.usage?.server_tool_use);
@@ -311,11 +328,10 @@ serve(async (req) => {
           providerFailures++;
           webSearchError = "OpenRouter web search could not be reached.";
         } finally {
-          clearTimeout(timeout);
           await recordProviderMetric(admin, {
             provider: "openrouter", surface: "scheduled", outcome: webOutcome, durationMs: Date.now() - webSearchStartedAt,
             resultCount: webResultCount, searchCount: webSearchCount, statusCode: webStatusCode,
-            unitCostUsd: parseEstimatedUnitCost(Deno.env.get("OPENROUTER_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry,
+            unitCostUsd: parseEstimatedUnitCost(Deno.env.get("OPENROUTER_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry, errorCode: webErrorCode,
           });
         }
         }
@@ -346,8 +362,11 @@ serve(async (req) => {
           } else {
             const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("TAVILY_DAILY_SEARCH_LIMIT") || "4", 10) || 4));
             const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "tavily", p_daily_limit: dailyLimit });
-            if (budgetError) throw budgetError;
-            if (reserved !== true) {
+            const budgetState = providerBudgetState(reserved, budgetError);
+            if (budgetState === "unavailable") {
+              failedSearches++; providerFailures++;
+              webSearchError = "Tavily budget could not be checked; saved search results will still be processed.";
+            } else if (budgetState === "exhausted") {
               searchBudgetReached = true;
               dailyBudgetReached = true;
               webSearchError = "Wishly reached its configured daily Tavily search budget. Research will retry tomorrow.";
@@ -357,13 +376,15 @@ serve(async (req) => {
               let outcome: "success" | "error" = "error";
               let statusCode: number | null = null;
               let resultCount = 0;
+              let tavilyErrorCode: ProviderErrorCode | null = null;
               const searchStartedAt = Date.now();
               try {
-                const result = await searchTavily(tavilyKey!, tavilyQuery);
+              const result = await searchTavily(tavilyKey!, tavilyQuery);
                 statusCode = result.response.status;
                 if (!result.response.ok) {
                   failedSearches++;
                   providerFailures++;
+                  tavilyErrorCode = classifyTavilyFailure(result.response.status);
                   webSearchError = result.response.status === 401 ? "Tavily rejected its API key; check TAVILY_API_KEY." : result.response.status === 429 ? "Tavily rate limit reached." : "Tavily web search is temporarily unavailable.";
                 } else {
                   const retailerResults = result.data.results.filter((entry) => {
@@ -384,11 +405,12 @@ serve(async (req) => {
                 failedSearches++;
                 providerFailures++;
                 webSearchError = "Tavily web search could not be reached.";
+                tavilyErrorCode = "network_error";
               } finally {
                 await recordProviderMetric(admin, {
                   provider: "tavily", surface: "scheduled", outcome, durationMs: Date.now() - searchStartedAt,
                   resultCount, searchCount: 1, statusCode,
-                  unitCostUsd: parseEstimatedUnitCost(Deno.env.get("TAVILY_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry,
+                  unitCostUsd: parseEstimatedUnitCost(Deno.env.get("TAVILY_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry, errorCode: tavilyErrorCode,
                 });
               }
             }
@@ -400,13 +422,15 @@ serve(async (req) => {
         for (const item of items) {
           const attempts = Number(item.offer_search_attempts || 0) + 1;
           const retryDelayMs = getResearchRetryDelayMs(attempts);
-          await admin.from("items").update({
+          const { error: failStatusError } = await admin.from("items").update({
             last_offer_search_at: checkedAt,
             next_offer_search_at: new Date(Date.now() + retryDelayMs).toISOString(),
+            offer_research_lease_until: null,
             offer_search_attempts: attempts,
             enrichment_status: "failed",
             enrichment_error: "Configured product search sources were temporarily unavailable; saved offers were retained and research will retry.",
           }).eq("id", item.id);
+          if (failStatusError) persistenceFailures++;
         }
         continue;
       }
@@ -592,17 +616,16 @@ serve(async (req) => {
               retailerPagesVerified++;
             } else {
               const errorCode = attempt.errorCode || "product_identity_not_confirmed";
-              const restricted = errorCode === "robots_restricted";
-              const unavailable = errorCode.startsWith("http_") || ["fetch_failed", "response_truncated"].includes(errorCode);
+              const failure = classifyRetailerFailure(errorCode, attempt.status);
               if (retailer?.id) await admin.from("retailers").update({
-                validation_status: retailer.validation_status === "validated" ? "validated" : restricted ? "restricted" : unavailable ? "temporarily_unavailable" : "discovered",
+                validation_status: retailer.validation_status === "validated" && failure.status !== "restricted" ? "validated" : failure.status,
                 last_inspected_at: checkedAt, last_error: errorCode,
-                retry_after: new Date(Date.now() + (restricted ? 7 : unavailable ? 1 : 0.25) * 24 * 60 * 60 * 1000).toISOString(),
-                reliability_score: Math.max(0, Number(retailer.reliability_score ?? 0.5) - (restricted ? 0.05 : unavailable ? 0.02 : 0)),
+                retry_after: new Date(Date.now() + failure.retryAfterMs).toISOString(),
+                reliability_score: Math.max(0, Number(retailer.reliability_score ?? 0.5) - (failure.status === "restricted" ? 0.05 : failure.status === "temporarily_unavailable" ? 0.02 : 0)),
               }).eq("id", retailer.id);
             }
             const errorCode = attempt.errorCode;
-            const outcome = attempt.offer ? "inspection_succeeded" : errorCode === "robots_restricted" ? "restricted" : "inspection_failed";
+            const outcome = attempt.offer ? "inspection_succeeded" : classifyRetailerFailure(errorCode, attempt.status).status === "restricted" ? "restricted" : "inspection_failed";
             await admin.from("retailer_discovery_events").insert({
               retailer_id: retailer?.id || null, canonical_domain: domain, product_id: item.product_id || null,
               source_provider: sourceProvider, source_query: discoveryQueryHash, source_url: attempt.finalUrl,
@@ -679,11 +702,21 @@ serve(async (req) => {
         if (persistenceMatches.length) {
           const preference = preferenceByWishlist.get(item.wishlist_id);
           const convertedMatches = await addOfferCurrencyConversions(
-            persistenceMatches.map((offer) => ({ ...offer, destination_country: preference?.country || null })),
+            persistenceMatches.map((offer) => withOfferVerificationEvidence({ ...offer, destination_country: preference?.country || null })),
             String(preference?.currency || item.currency || "USD"),
           );
-          const { data: saved, error: saveError } = await admin.from("store_offers").upsert(convertedMatches, { onConflict: "item_id,source,url" }).select("id,store,price,currency,source,url,availability,last_verified_at,is_verified");
+          const existingResult = await admin.from("store_offers").select("source,url,is_verified,verification_status").eq("item_id", item.id).in("url", convertedMatches.map((offer) => offer.url));
+          if (existingResult.error) {
+            persistenceFailures++;
+            await deferPersistenceRetry(admin, item, checkedAt, "offer_upsert");
+            continue;
+          }
+          const safeMatches = preserveExistingVerifiedOffers(existingResult.data || [], convertedMatches);
+          const { data: saved, error: saveError } = safeMatches.length
+            ? await admin.from("store_offers").upsert(safeMatches, { onConflict: "item_id,source,url" }).select("id,store,price,currency,source,url,availability,last_verified_at,is_verified")
+            : { data: [], error: null };
           if (saveError) {
+            persistenceFailures++;
             await deferPersistenceRetry(admin, item, checkedAt, "offer_upsert");
             continue;
           }
@@ -693,13 +726,17 @@ serve(async (req) => {
           if (saved?.length) {
             const observations = await recordOfferPriceObservations(admin, item.id, saved, checkedAt);
             if (observations.failed) {
+              persistenceFailures++;
               await deferPersistenceRetry(admin, item, checkedAt, "price_history");
               continue;
             }
           }
         }
-        const hasExactMatch = verifiedRows.length > 0;
-        const status = hasExactMatch ? (failedSearches ? "partial" : "offers_available") : allMatches.length ? "partial" : failedSearches ? "failed" : "no_matches";
+        const hasExactMatch = verifiedRows.some((offer: any) => offer.availability !== "out_of_stock");
+        const status = deriveResearchOutcome({
+          verifiedOffers: hasExactMatch ? 1 : 0, candidates: allMatches.length,
+          providerFailures: failedSearches, budgetReached: searchBudgetReached, configured: true,
+        }).status;
         const searchError = failedSearches
           ? webSearchError || "Some configured product searches failed; these results may be incomplete."
           : allMatches.length && !hasExactMatch
@@ -707,23 +744,39 @@ serve(async (req) => {
             : null;
         const attempts = failedSearches ? Number(item.offer_search_attempts || 0) + 1 : 0;
         const retryDelayMs = searchBudgetReached ? 24 * 60 * 60 * 1000 : failedSearches ? getResearchRetryDelayMs(attempts) : item.target_price != null ? 2 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
-        await admin.from("items").update({
+        const { error: itemStatusError } = await admin.from("items").update({
           offers_last_checked_at: checkedAt, last_offer_search_at: checkedAt,
           next_offer_search_at: new Date(Date.now() + retryDelayMs).toISOString(),
+          offer_research_lease_until: null,
           offer_search_attempts: attempts, enrichment_status: searchBudgetReached && !allMatches.length ? "failed" : status,
           enrichment_error: searchBudgetReached ? webSearchError || "Wishly reached its configured daily provider search budget. Research will retry tomorrow." : searchError,
         }).eq("id", item.id);
-        if (item.product_id) await admin.from("products").update({ offers_last_checked_at: checkedAt, offer_search_status: status }).eq("id", item.product_id);
+        if (itemStatusError) {
+          persistenceFailures++;
+          console.error(JSON.stringify({ event: "scheduled_offer_status_update_failed", item_id: item.id, error_code: itemStatusError.code || null }));
+        }
+        if (item.product_id) {
+          const { error: productStatusError } = await admin.from("products").update({ offers_last_checked_at: checkedAt, offer_search_status: status }).eq("id", item.product_id);
+          if (productStatusError) persistenceFailures++;
+        }
       }
     }
     const retailerNow = new Date().toISOString();
-    const { data: retailerQueue, error: retailerQueueError } = await admin.from("retailers")
-      .select("id,name,canonical_domain,country_code,discovery_source,validation_status,reliability_score,trust_evidence,extraction_capabilities")
-      .in("validation_status", ["discovered", "pending_inspection", "temporarily_unavailable"])
-      .or(`retry_after.is.null,retry_after.lte.${retailerNow}`)
-      .order("last_inspected_at", { ascending: true, nullsFirst: true })
-      .order("first_discovered_at", { ascending: true })
-      .limit(1);
+    const fetchRetailerQueue = async (country: "MA" | "GLOBAL") => {
+      let query = admin.from("retailers")
+        .select("id,name,domain,canonical_domain,country_code,discovery_source,validation_status,reliability_score,trust_evidence,extraction_capabilities")
+        .in("validation_status", ["discovered", "pending_inspection", "temporarily_unavailable", "restricted"])
+        .or(`retry_after.is.null,retry_after.lte.${retailerNow}`);
+      query = country === "MA" ? query.eq("country_code", "MA") : query.neq("country_code", "MA");
+      return await query.order("last_inspected_at", { ascending: true, nullsFirst: true })
+        .order("first_discovered_at", { ascending: true }).limit(1);
+    };
+    const primaryMarket = primaryRetailerValidationMarket();
+    const firstQueue = await fetchRetailerQueue(primaryMarket);
+    const fallbackMarket = primaryMarket === "MA" ? "GLOBAL" : "MA";
+    const secondQueue = !firstQueue.error && !(firstQueue.data || []).length ? await fetchRetailerQueue(fallbackMarket) : null;
+    const retailerQueueError = firstQueue.error || secondQueue?.error || null;
+    const retailerQueue = firstQueue.error ? [] : (firstQueue.data?.length ? firstQueue.data : secondQueue?.data || []);
     if (retailerQueueError) {
       console.error(JSON.stringify({ event: "retailer_catalog_queue_failed" }));
     } else {
@@ -736,10 +789,10 @@ serve(async (req) => {
           .eq("id", retailer.id);
         const inspection = await inspectRetailerCatalog(domain, retailerDns, retailerTransport);
         const inspectedAt = new Date().toISOString();
-        const retryHours = inspection.status === "validated" ? 30 * 24
-          : inspection.status === "restricted" ? 30 * 24
-            : inspection.status === "temporarily_unavailable" ? 24
-              : inspection.status === "rejected" ? 90 * 24 : 7 * 24;
+        const retryDelayMs = inspection.status === "validated"
+          ? 30 * 24 * 60 * 60 * 1000
+          : inspection.status === "rejected" ? 90 * 24 * 60 * 60 * 1000
+            : classifyRetailerFailure(inspection.errorCode, inspection.httpStatus).retryAfterMs;
         const reliability = Math.max(0, Math.min(1, Number(retailer.reliability_score ?? 0.5)
           + (inspection.status === "validated" ? 0.02 : inspection.status === "restricted" || inspection.status === "temporarily_unavailable" ? -0.02 : 0)));
         const extractionCapabilities = {
@@ -760,7 +813,7 @@ serve(async (req) => {
           last_inspected_at: inspectedAt,
           ...(inspection.status === "validated" ? { last_successful_at: inspectedAt } : {}),
           last_error: inspection.errorCode,
-          retry_after: new Date(Date.now() + retryHours * 60 * 60 * 1000).toISOString(),
+          retry_after: new Date(Date.now() + retryDelayMs).toISOString(),
           reliability_score: reliability,
           extraction_capabilities: extractionCapabilities,
           trust_evidence: evidenceText,
@@ -795,8 +848,8 @@ serve(async (req) => {
     }
 
     const durationMs = Date.now() - startedAt;
-    console.info(JSON.stringify({ event: "wishly_scheduled_research", providers: [apiKey ? "serpapi_google_shopping" : null, openRouterKey ? "openrouter_web_search" : null, tavilyEnabled ? "tavily_web_search" : null].filter(Boolean), provider_searches: searched + webSearches + tavilySearches, shopping_searches: searched, shopping_rows_received: shoppingRowsReceived, shopping_candidate_evaluations: shoppingCandidateEvaluations, shopping_candidates_accepted: shoppingCandidatesAccepted, shopping_candidate_rejections: shoppingCandidateRejections, shopping_condition_comparisons: shoppingConditionComparisons, web_searches: webSearches + tavilySearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, due_items: due?.length || 0, skipped_without_identity: skipped, duration_ms: durationMs }));
-    return json({ success: true, due_items: due?.length || 0, provider_searches: searched + webSearches + tavilySearches, shopping_searches: searched, shopping_rows_received: shoppingRowsReceived, shopping_candidate_evaluations: shoppingCandidateEvaluations, shopping_candidates_accepted: shoppingCandidatesAccepted, shopping_candidate_rejections: shoppingCandidateRejections, shopping_condition_comparisons: shoppingConditionComparisons, web_searches: webSearches + tavilySearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, skipped_without_identity: skipped, duration_ms: durationMs });
+    console.info(JSON.stringify({ event: "wishly_scheduled_research", providers: [apiKey ? "serpapi_google_shopping" : null, openRouterEnabled ? "openrouter_web_search" : null, tavilyEnabled ? "tavily_web_search" : null].filter(Boolean), provider_searches: searched + webSearches + tavilySearches, shopping_searches: searched, shopping_rows_received: shoppingRowsReceived, shopping_candidate_evaluations: shoppingCandidateEvaluations, shopping_candidates_accepted: shoppingCandidatesAccepted, shopping_candidate_rejections: shoppingCandidateRejections, shopping_condition_comparisons: shoppingConditionComparisons, web_searches: webSearches + tavilySearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, due_items: selectedItems.length, claimed_due_items: dueItemIds.length, skipped_without_identity: skipped, duration_ms: durationMs }));
+    return json({ success: providerFailures === 0 && persistenceFailures === 0 && !dailyBudgetReached, partial: (providerFailures > 0 || persistenceFailures > 0 || dailyBudgetReached) && offersSaved > 0, due_items: selectedItems.length, claimed_due_items: dueItemIds.length, provider_searches: searched + webSearches + tavilySearches, shopping_searches: searched, shopping_rows_received: shoppingRowsReceived, shopping_candidate_evaluations: shoppingCandidateEvaluations, shopping_candidates_accepted: shoppingCandidatesAccepted, shopping_candidate_rejections: shoppingCandidateRejections, shopping_condition_comparisons: shoppingConditionComparisons, web_searches: webSearches + tavilySearches, retailer_pages_verified: retailerPagesVerified, retailer_seeds_inspected: retailerSeedsInspected, retailer_seeds_validated: retailerSeedsValidated, provider_failures: providerFailures, persistence_failures: persistenceFailures, daily_budget_reached: dailyBudgetReached, offers_saved: offersSaved, skipped_without_identity: skipped, duration_ms: durationMs });
   } catch {
     return json({ error: "Scheduled offer refresh failed; existing offer records were retained." }, 500);
   }

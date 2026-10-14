@@ -21,6 +21,37 @@ export interface SearXNGCandidate {
   source: "searxng_web_search";
 }
 
+const cooldownUntil = new Map<string, number>();
+const MAX_RETRY_AFTER_MS = 15 * 60_000;
+
+export interface SearXNGRetryOptions {
+  now?: () => number;
+  random?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+}
+
+export function classifySearXNGFailure(status: number): "rate_limited" | "provider_unavailable" | "provider_error" {
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "provider_unavailable";
+  return "provider_error";
+}
+
+function retryAfterMs(response: Response, now: number, random: () => number): number {
+  const header = response.headers.get("retry-after")?.trim();
+  if (header) {
+    const seconds = Number(header);
+    const requested = Number.isFinite(seconds)
+      ? seconds * 1000
+      : Date.parse(header) - now;
+    if (Number.isFinite(requested) && requested > 0) {
+      return Math.min(MAX_RETRY_AFTER_MS, requested);
+    }
+  }
+  // Back off for a meaningful interval, with jitter, before the single retry.
+  return 1_000 + Math.floor(Math.max(0, Math.min(0.999999, random())) * 2_000);
+}
+
 export function parseSearXNGResponse(value: unknown): SearXNGResult[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const rows = (value as Record<string, unknown>).results;
@@ -82,13 +113,32 @@ export async function searchSearXNG(
   query: string,
   language = "en",
   fetcher: typeof fetch = fetch,
+  retryOptions: SearXNGRetryOptions = {},
 ): Promise<{ response: Response; results: SearXNGResult[] }> {
   const url = buildSearXNGSearchUrl(baseUrl, query, language);
   if (!url) throw new Error("SearXNG must be configured with a valid HTTPS base URL.");
-  const response = await fetcher(url, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(8_000),
-  });
+  const now = retryOptions.now || Date.now;
+  const host = url.hostname.toLowerCase();
+  if ((cooldownUntil.get(host) || 0) > now()) {
+    return { response: new Response(null, { status: 429, statusText: "SearXNG cooldown" }), results: [] };
+  }
+  const sleep = retryOptions.sleep || ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const random = retryOptions.random || Math.random;
+  const timeoutMs = retryOptions.timeoutMs || 8_000;
+  let response = await fetcher(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
+  // Retry only a 429, once, with bounded jitter. A second 429 cools the host down.
+  if (response.status === 429) {
+    const delay = retryAfterMs(response, now(), random);
+    // Suppress concurrent refreshes while this one bounded retry is pending.
+    cooldownUntil.set(host, now() + Math.min(MAX_RETRY_AFTER_MS, Math.max(60_000, delay)));
+    await sleep(delay);
+    response = await fetcher(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
+    if (response.status === 429) {
+      const secondDelay = retryAfterMs(response, now(), random);
+      cooldownUntil.set(host, now() + Math.min(MAX_RETRY_AFTER_MS, Math.max(60_000, secondDelay)));
+    }
+    else cooldownUntil.delete(host);
+  } else if (response.ok) cooldownUntil.delete(host);
   if (!response.ok) return { response, results: [] };
   let payload: unknown;
   try { payload = await response.json(); }

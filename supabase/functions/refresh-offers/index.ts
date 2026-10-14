@@ -4,15 +4,21 @@ import { confirmsGenderVariant, getGenderVariant } from "../_shared/gender-varia
 import { calculateTotalPurchaseCost, parseShippingEstimate } from "../_shared/offer-cost.ts";
 import { addOfferCurrencyConversions } from "../_shared/exchange-rate.ts";
 import { parseEstimatedUnitCost, parseOpenRouterWebSearchCount, recordProviderMetric, type ProviderErrorCode } from "../_shared/provider-metrics.ts";
-import { classifySerpApiFailure, describeSerpApiHttpFailure, parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
+import { buildSerpApiShoppingRequest, classifySerpApiFailure, describeSerpApiHttpFailure, parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
+import { classifyOpenRouterFailure, describeOpenRouterFailure, requestOpenRouter } from "../_shared/openrouter.ts";
+import { providerBudgetState } from "../_shared/provider-budget.ts";
 import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
-import { buildProductSearchQueries } from "../_shared/product-search.ts";
+import { buildMarketProductSearchQueries } from "../_shared/product-search.ts";
 import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/research-persistence.ts";
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
-import { buildRetailerQueries, searchTavily } from "../_shared/tavily.ts";
-import { parseSearXNGResponse, searchSearXNG } from "../_shared/searxng.ts";
-import { classifySeller, getRetailerDomain, inferRetailerCountry, inspectRetailerProductPage, productOfferEvidenceError, selectRetailerInspectionTargets } from "../_shared/retailer-discovery.ts";
+import { buildRetailerQueries, classifyTavilyFailure, searchTavily } from "../_shared/tavily.ts";
+import { classifySearXNGFailure, parseSearXNGResponse, searchSearXNG } from "../_shared/searxng.ts";
+import { classifyRetailerFailure, classifySeller, getRetailerDomain, inferRetailerCountry, inspectRetailerProductPage, productOfferEvidenceError, selectRetailerInspectionTargets } from "../_shared/retailer-discovery.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
+import { isRetailerUrl } from "../_shared/web-search.ts";
+import { preserveExistingVerifiedOffers, withOfferVerificationEvidence } from "../_shared/offer-verification.ts";
+import { isProductPriceCurrent } from "../_shared/product-metadata.ts";
+import { deriveResearchOutcome } from "../_shared/research-outcome.ts";
 
 const retailerDns = (hostname: string, recordType: "A" | "AAAA") => Deno.resolveDns(hostname, recordType);
 const retailerTransport = {
@@ -90,6 +96,7 @@ function matchListing(title: string, target: { title: string; brand: string; mod
 
 function retailerFromUrl(value: string): string | null {
   try {
+    if (!isRetailerUrl(value)) return null;
     const host = new URL(value).hostname.toLowerCase().replace(/^www\./, "");
     if (/^(google|bing|yahoo|duckduckgo|facebook|instagram|tiktok|youtube|reddit|wikipedia|pinterest|tomsguide|techradar|cnet|theverge|wired|nytimes|forbes|engadget|digitaltrends)\./.test(host)) return null;
     return host;
@@ -141,13 +148,21 @@ serve(async (req) => {
           const copies = sharedOffers.map((offer) => {
             const copy = { ...offer, item_id: item.id };
             delete copy.id;
-            return copy;
+            return withOfferVerificationEvidence(copy);
           });
           const localizedCopies = await addOfferCurrencyConversions(
             copies.map((offer) => ({ ...offer, destination_country: userPreferences?.country || null })),
             String(userPreferences?.currency || item.currency || "USD"),
           );
-          const { data: copied, error: copyError } = await admin.from("store_offers").upsert(localizedCopies, { onConflict: "item_id,source,url" }).select("id,store,price,currency,source,url,availability,last_verified_at,is_verified");
+          const existingCopyResult = await admin.from("store_offers").select("source,url,is_verified,verification_status").eq("item_id", item.id).in("url", localizedCopies.map((offer) => offer.url));
+          if (existingCopyResult.error) {
+            const retry = await deferPersistenceRetry(admin, item, new Date().toISOString(), "offer_upsert");
+            return reply({ error: "Recent offers could not be checked safely before saving; existing offers were preserved and a retry was scheduled.", retry_scheduled: retry.scheduled }, 503);
+          }
+          const safeCopies = preserveExistingVerifiedOffers(existingCopyResult.data || [], localizedCopies);
+          const { data: copied, error: copyError } = safeCopies.length
+            ? await admin.from("store_offers").upsert(safeCopies, { onConflict: "item_id,source,url" }).select("id,store,price,currency,source,url,availability,last_verified_at,is_verified")
+            : { data: [], error: null };
           if (copyError) {
             const retry = await deferPersistenceRetry(admin, item, new Date().toISOString(), "offer_upsert");
             return reply({ error: retry.scheduled ? "Recent product offers were found, but Wishly could not save them. A retry is scheduled." : "Recent product offers were found, but Wishly could not save them or schedule a retry.", retry_scheduled: retry.scheduled }, 503);
@@ -161,10 +176,11 @@ serve(async (req) => {
           if (count) {
             const checkedAt = new Date();
             const interval = item.target_price != null ? 2 : 6;
-            await admin.from("items").update({
+            const { error: cacheScheduleError } = await admin.from("items").update({
               last_offer_search_at: checkedAt.toISOString(),
               next_offer_search_at: new Date(checkedAt.getTime() + interval * 60 * 60 * 1000).toISOString(),
             }).eq("id", item.id);
+            if (cacheScheduleError) return reply({ error: "Cached offers were saved, but the refresh could not be rescheduled." }, 503);
             return reply({ configured: true, cached: true, status: productCache?.offer_search_status || "partial", offers_found: count });
           }
         }
@@ -183,13 +199,13 @@ serve(async (req) => {
     const targetCapacity = variantValue(productTitle, /\b\d+\s*(?:gb|tb|mb)\b/i);
     const targetColor = variantValue(productTitle, /\b(?:black|white|silver|gold|blue|red|green|yellow|purple|pink|midnight|starlight|graphite|natural titanium|desert titanium)\b/i);
     const matchTarget = { title: productTitle, brand: String(item.brand || ""), model: targetModel, gtin: targetGtin, capacity: targetCapacity, color: targetColor, size: targetSize, gender: targetGender, condition: String(item.condition || "unknown") };
-    const searchQueries = buildProductSearchQueries({
+    const searchQueries = buildMarketProductSearchQueries({
       gtin: targetGtin,
       brand: item.brand,
       modelNumber: item.model_number,
       title: productTitle,
       variant: item.variant_label,
-    });
+    }, targetCountry);
     let shoppingRows: any[] = [];
     let shoppingQueryCount = 0;
     let shoppingFailures = 0;
@@ -203,25 +219,49 @@ serve(async (req) => {
     let searxngSearchError: string | null = null;
     let searxngQueriesCount = 0;
     let retailerPagesInspected = 0;
+    let offersPersisted = 0;
     let inspectionBudget = 0;
+    let tavilyPagesInspected = 0;
+    let searxngPagesInspected = 0;
+    const maxRetailerPagesPerRefresh = 6;
     const inspectedDomains = new Set<string>();
     if (apiKey) {
       for (const searchQuery of searchQueries.slice(0, 3)) {
+        const request = buildSerpApiShoppingRequest({ query: searchQuery, gl: market.gl, hl: market.hl, apiKey });
+        if (request.error) { shoppingSearchError = "Google Shopping request parameters were invalid."; shoppingFailures++; break; }
+        const cacheInput = `serpapi|${market.gl}|${market.hl}|${searchQuery.toLowerCase().replace(/\s+/g, " ").trim()}`;
+        const cacheDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(cacheInput));
+        const cacheHash = Array.from(new Uint8Array(cacheDigest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const cacheNow = new Date().toISOString();
+        const { data: cachedSearch, error: cacheReadError } = await admin.from("retailer_search_cache").select("results")
+          .eq("query_hash", cacheHash).eq("provider", "serpapi").gt("expires_at", cacheNow).maybeSingle();
+        if (cacheReadError) console.warn(JSON.stringify({ event: "retailer_search_cache_read_failed", provider: "serpapi", error_code: cacheReadError.code || null }));
+        if (Array.isArray(cachedSearch?.results)) {
+          const cachedRows = parseSerpApiShoppingResponse({ shopping_results: cachedSearch.results }).rows as any[];
+          shoppingRows.push(...cachedRows);
+          const hasStrongMatch = cachedRows.some((row: any) => {
+            const match = matchListing(
+              `${String(row.title || "")} ${[row.size, ...(Array.isArray(row.extensions) ? row.extensions : [])].filter((part) => typeof part === "string").join(" ")}`,
+              matchTarget,
+              [row.gtin, row.upc, row.ean],
+              row.condition,
+            );
+            return Boolean(match && match.confidence >= 0.9);
+          });
+          if (hasStrongMatch) break;
+          continue;
+        }
         const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SERPAPI_DAILY_SEARCH_LIMIT") || "31", 10) || 31));
         const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "serpapi", p_daily_limit: dailyLimit });
-        if (budgetError) throw budgetError;
-        if (reserved !== true) {
+        const budgetState = providerBudgetState(reserved, budgetError);
+        if (budgetState === "unavailable") { shoppingSearchError = "Google Shopping budget could not be checked; other providers will continue."; break; }
+        if (budgetState === "exhausted") {
           shoppingBudgetReached = true;
           shoppingSearchError = "Wishly reached its configured daily Google Shopping search budget. Try again tomorrow.";
           await recordProviderMetric(admin, { provider: "serpapi", surface: "interactive", outcome: "budget_exhausted", marketCountry: targetCountry });
           break;
         }
-        const searchUrl = new URL("https://serpapi.com/search.json");
-        searchUrl.searchParams.set("engine", "google_shopping");
-        searchUrl.searchParams.set("q", searchQuery);
-        searchUrl.searchParams.set("gl", market.gl);
-        searchUrl.searchParams.set("hl", market.hl);
-        searchUrl.searchParams.set("api_key", apiKey!);
+        const searchUrl = request.url;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 25000);
         shoppingQueryCount++;
@@ -252,6 +292,11 @@ serve(async (req) => {
               resultCount = rows.length;
               outcome = "success";
               shoppingRows.push(...rows);
+              const { error: cacheError } = await admin.from("retailer_search_cache").upsert({
+                query_hash: cacheHash, provider: "serpapi", results: rows,
+                expires_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+              }, { onConflict: "query_hash" });
+              if (cacheError) console.warn(JSON.stringify({ event: "retailer_search_cache_write_failed", provider: "serpapi", error_code: cacheError.code || null }));
               const hasStrongMatch = rows.some((row: any) => {
                 const match = matchListing(
                   `${String(row.title || "")} ${[row.size, ...(Array.isArray(row.extensions) ? row.extensions : [])].filter((part) => typeof part === "string").join(" ")}`,
@@ -276,6 +321,7 @@ serve(async (req) => {
             marketCountry: targetCountry,
           });
         }
+        if ([400, 401, 402, 403, 429].includes(statusCode || 0)) break;
       }
     } else shoppingSearchError = "Google Shopping is not configured.";
 
@@ -315,8 +361,10 @@ serve(async (req) => {
     // Structured Shopping results are useful retailer leads even when Tavily is
     // unavailable. Inspect a bounded set of high-confidence listings directly;
     // only page evidence can validate the retailer or create a verified offer.
-    for (const lead of selectRetailerInspectionTargets(offerRows, 3)) {
-      if (inspectionBudget >= 3) break;
+    // Retain the full ranked lead set here; retailer retry_after skips already
+    // inspected domains so a later run can reach the next candidates.
+    for (const lead of selectRetailerInspectionTargets(offerRows, 40)) {
+      if (inspectionBudget >= 2) break;
       const domain = getRetailerDomain(lead.url);
       if (!domain || !retailerFromUrl(lead.url) || inspectedDomains.has(domain)) continue;
       inspectedDomains.add(domain);
@@ -359,28 +407,28 @@ serve(async (req) => {
       const inspection = await inspectRetailerProductPage(lead.url, retailerDns, retailerTransport);
       const metadata = inspection.metadata;
       if (!inspection.permitted || inspection.errorCode || !metadata?.title) {
-        const restricted = inspection.errorCode === "robots_restricted" || inspection.errorCode === "unsafe_url";
-        const unavailable = inspection.errorCode?.startsWith("http_") || ["fetch_failed", "fetch_unknown"].includes(inspection.errorCode || "");
+        const failure = classifyRetailerFailure(inspection.errorCode, inspection.status);
         if (retailerId) await admin.from("retailers").update({
-          validation_status: restricted ? "restricted" : unavailable ? "temporarily_unavailable" : "discovered",
+          validation_status: failure.status,
           last_inspected_at: new Date().toISOString(), last_error: inspection.errorCode,
-          retry_after: new Date(Date.now() + (restricted ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString(),
-          reliability_score: Math.max(0, Number(existingRetailer?.reliability_score ?? 0.5) - (restricted ? 0.1 : 0.05)),
+          retry_after: new Date(Date.now() + failure.retryAfterMs).toISOString(),
+          reliability_score: Math.max(0, Number(existingRetailer?.reliability_score ?? 0.5) - (failure.status === "restricted" ? 0.1 : failure.status === "temporarily_unavailable" ? 0.02 : 0)),
         }).eq("id", retailerId);
         await admin.from("retailer_discovery_events").insert({
           retailer_id: retailerId, canonical_domain: domain, product_id: item.product_id || null,
           source_provider: "serpapi", source_query: queryHash, source_url: inspection.finalUrl,
-          outcome: restricted ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
+          outcome: failure.status === "restricted" ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
           evidence: { status: inspection.status },
         });
         continue;
       }
 
       const pageTitle = [metadata.title, metadata.brand, metadata.model_number, metadata.variant_name].filter(Boolean).join(" ");
+      const currentPagePrice = isProductPriceCurrent(metadata.price, metadata.price_valid_until) ? metadata.price : null;
       const pageMatch = matchListing(pageTitle, matchTarget, [metadata.gtin, metadata.sku], metadata.condition);
       const pageCurrency = resolveProviderCurrency(metadata.currency, "");
       const pageIdentityConfirmed = Boolean(pageMatch && pageMatch.confidence >= 0.9 && !pageMatch.matchType.includes("unconfirmed"));
-      const validationError = productOfferEvidenceError(pageIdentityConfirmed, metadata.price, pageCurrency);
+      const validationError = productOfferEvidenceError(pageIdentityConfirmed, currentPagePrice, pageCurrency);
       const verifiedRetailer = validationError === null;
       const sellerType = classifySeller(inspection.canonicalDomain || domain);
       const observedAt = new Date().toISOString();
@@ -402,13 +450,15 @@ serve(async (req) => {
         outcome: verifiedRetailer ? "inspection_succeeded" : "inspection_failed", error_code: validationError,
         evidence: { title: metadata.title, price: metadata.price, currency: metadata.currency, has_image: Boolean(metadata.image_url), variant_count: metadata.variants.length },
       });
-      if (pageMatch && metadata.price && pageCurrency) offerRows.push({
+      if (pageIdentityConfirmed && currentPagePrice && pageCurrency) offerRows.push({
         item_id: item.id, product_id: item.product_id, variant_id: item.variant_id,
         store: existingRetailer?.name || lead.store || domain, seller: domain, listing_title: metadata.title.slice(0, 300), image_url: metadata.image_url,
         seller_type: sellerType === "unknown" ? existingRetailer?.seller_type || "unknown" : sellerType,
         size_label: pageMatch.candidateSize?.label || null, size_system: pageMatch.candidateSize?.system || null, color_label: pageMatch.candidateColor,
         product_match_confidence: pageMatch.confidence, match_type: pageMatch.matchType,
-        price: metadata.price, currency: pageCurrency, url: metadata.canonical_url || inspection.finalUrl,
+        price: currentPagePrice, currency: pageCurrency, url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : inspection.finalUrl,
+        source_url: inspection.finalUrl, canonical_url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : null,
+        product_gtin: metadata.gtin, product_sku: metadata.sku, product_model_number: metadata.model_number,
         original_price: metadata.original_price, discount_percent: metadata.discount_percent,
         shipping_cost: 0, taxes: 0, total_price: null, delivery_estimate: null,
         shipping_known: false, taxes_known: false, total_is_estimated: true,
@@ -436,7 +486,10 @@ serve(async (req) => {
       .in("country_code", [...new Set([targetCountry || "MA", "GLOBAL"])])
       .limit(20);
     const knownDomains = (knownRetailers || []).map((retailer) => String(retailer.canonical_domain || "")).filter(Boolean);
-    if (tavilyEnabled && !offerRows.some((offer) => offer.product_match_confidence >= 0.9)) {
+    if (tavilyEnabled) {
+      const unlimitedTavilyEmails = new Set((Deno.env.get("TAVILY_UNLIMITED_USER_EMAILS") || "")
+        .split(",").map((email) => email.trim().toLowerCase()).filter(Boolean));
+      const tavilyUserIsUnlimited = Boolean(userData.user.email && unlimitedTavilyEmails.has(userData.user.email.trim().toLowerCase()));
       for (const [queryIndex, query] of tavilyQueries.slice(0, 3).entries()) {
         const includeDomains = queryIndex === 1 ? knownDomains : [];
         const cacheInput = `${query.toLowerCase().replace(/\s+/g, " ").trim()}|${includeDomains.join(",")}`;
@@ -447,21 +500,28 @@ serve(async (req) => {
           .eq("query_hash", queryHash).eq("provider", "tavily").gt("expires_at", now).maybeSingle();
         let candidates: Array<{ title: string; url: string; content: string; score: number | null }> = Array.isArray(cached?.results) ? cached.results : [];
         if (!cached) {
-          const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("TAVILY_DAILY_SEARCH_LIMIT") || "4", 10) || 4));
-          const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "tavily", p_daily_limit: dailyLimit });
-          if (budgetError) throw budgetError;
-          if (reserved !== true) {
-            tavilySearchError = "Wishly reached its configured daily Tavily search budget. Try again tomorrow.";
-            await recordProviderMetric(admin, { provider: "tavily", surface: "interactive", outcome: "budget_exhausted", marketCountry: targetCountry });
-            break;
+          if (!tavilyUserIsUnlimited) {
+            const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("TAVILY_DAILY_SEARCH_LIMIT") || "4", 10) || 4));
+            const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "tavily", p_daily_limit: dailyLimit });
+            const budgetState = providerBudgetState(reserved, budgetError);
+            if (budgetState === "unavailable") { tavilySearchError = "Tavily budget could not be checked; other providers will continue."; break; }
+            if (budgetState === "exhausted") {
+              tavilySearchError = "Wishly reached its configured daily Tavily search budget. Try again tomorrow.";
+              await recordProviderMetric(admin, { provider: "tavily", surface: "interactive", outcome: "budget_exhausted", marketCountry: targetCountry });
+              break;
+            }
           }
           const startedAt = Date.now();
           let statusCode: number | null = null;
+          let tavilyErrorCode: ProviderErrorCode | null = null;
           let outcome: "success" | "error" = "error";
           try {
             const result = await searchTavily(tavilyKey!, query, fetch, includeDomains);
             statusCode = result.response.status;
-            if (!result.response.ok) tavilySearchError = result.response.status === 401 ? "Tavily rejected its API key." : result.response.status === 429 ? "Tavily rate limit reached." : result.data.error || "Tavily search is temporarily unavailable.";
+            if (!result.response.ok) {
+              tavilyErrorCode = classifyTavilyFailure(result.response.status);
+              tavilySearchError = result.response.status === 401 ? "Tavily rejected its API key." : result.response.status === 429 ? "Tavily rate limit reached." : result.data.error || "Tavily search is temporarily unavailable.";
+            }
             else {
               candidates = result.data.results;
               outcome = "success";
@@ -471,8 +531,9 @@ serve(async (req) => {
             }
           } catch {
             tavilySearchError = "Tavily search could not be reached.";
+            tavilyErrorCode = "network_error";
           } finally {
-            await recordProviderMetric(admin, { provider: "tavily", surface: "interactive", outcome, durationMs: Date.now() - startedAt, resultCount: candidates.length, searchCount: 1, statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("TAVILY_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry });
+            await recordProviderMetric(admin, { provider: "tavily", surface: "interactive", outcome, durationMs: Date.now() - startedAt, resultCount: candidates.length, searchCount: 1, statusCode, errorCode: tavilyErrorCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("TAVILY_ESTIMATED_COST_PER_SEARCH_USD")), marketCountry: targetCountry });
           }
         } else {
           tavilySearchAttempted = true;
@@ -480,7 +541,7 @@ serve(async (req) => {
         }
 
         for (const lead of candidates) {
-          if (inspectionBudget >= 3) break;
+          if (tavilyPagesInspected >= 2 || inspectionBudget >= maxRetailerPagesPerRefresh) break;
           const domain = getRetailerDomain(lead.url);
           if (!domain || !retailerFromUrl(lead.url) || inspectedDomains.has(domain)) continue;
           inspectedDomains.add(domain);
@@ -515,21 +576,20 @@ serve(async (req) => {
 
           inspectionBudget++;
           retailerPagesInspected++;
+          tavilyPagesInspected++;
           const inspection = await inspectRetailerProductPage(lead.url, retailerDns, retailerTransport);
           const metadata = inspection.metadata;
           if (!inspection.permitted || inspection.errorCode || !metadata?.title) {
-            const restricted = inspection.errorCode === "robots_restricted" || inspection.errorCode === "unsafe_url";
-            const unavailable = inspection.errorCode?.startsWith("http_") || ["fetch_failed", "fetch_unknown"].includes(inspection.errorCode || "");
-            const nextStatus = restricted ? "restricted" : unavailable ? "temporarily_unavailable" : "discovered";
+            const failure = classifyRetailerFailure(inspection.errorCode, inspection.status);
             if (retailerId) await admin.from("retailers").update({
-              validation_status: nextStatus, last_inspected_at: new Date().toISOString(),
-              last_error: inspection.errorCode, retry_after: new Date(Date.now() + (restricted ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString(),
-              reliability_score: Math.max(0, Number(existingRetailer?.reliability_score ?? 0.5) - (restricted ? 0.1 : 0.05)),
+              validation_status: failure.status, last_inspected_at: new Date().toISOString(),
+              last_error: inspection.errorCode, retry_after: new Date(Date.now() + failure.retryAfterMs).toISOString(),
+              reliability_score: Math.max(0, Number(existingRetailer?.reliability_score ?? 0.5) - (failure.status === "restricted" ? 0.1 : failure.status === "temporarily_unavailable" ? 0.02 : 0)),
             }).eq("id", retailerId);
             await admin.from("retailer_discovery_events").insert({
               retailer_id: retailerId, canonical_domain: domain, product_id: item.product_id || null,
               source_provider: "tavily", source_query: queryHash, source_url: inspection.finalUrl,
-              outcome: restricted ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
+              outcome: failure.status === "restricted" ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
               evidence: { status: inspection.status },
             });
             continue;
@@ -537,10 +597,11 @@ serve(async (req) => {
 
           const pageTitle = [metadata.title, metadata.brand, metadata.model_number, metadata.variant_name].filter(Boolean).join(" ");
           const pageMatch = matchListing(pageTitle, matchTarget, [metadata.gtin, metadata.sku], metadata.condition);
-          const pagePrice = metadata.price;
-          const pageCurrency = resolveProviderCurrency(metadata.currency || "", String(item.currency || "USD").toUpperCase());
-          const hasUsableOffer = Boolean(pageMatch && pagePrice && pagePrice > 0 && pageCurrency);
-          const validationError = productOfferEvidenceError(Boolean(pageMatch), pagePrice, pageCurrency);
+          const pagePrice = isProductPriceCurrent(metadata.price, metadata.price_valid_until) ? metadata.price : null;
+          const pageCurrency = resolveProviderCurrency(metadata.currency || "", "");
+          const pageIdentityConfirmed = Boolean(pageMatch && pageMatch.confidence >= 0.9 && !pageMatch.matchType.includes("unconfirmed"));
+          const hasUsableOffer = Boolean(pageIdentityConfirmed && pagePrice && pagePrice > 0 && pageCurrency);
+          const validationError = productOfferEvidenceError(pageIdentityConfirmed, pagePrice, pageCurrency);
           const verifiedRetailer = validationError === null && Boolean(metadata.title);
           const sellerType = classifySeller(inspection.canonicalDomain || domain);
           if (retailerId) await admin.from("retailers").update({
@@ -569,25 +630,27 @@ serve(async (req) => {
             seller_type: sellerType === "unknown" ? existingRetailer?.seller_type || "unknown" : sellerType,
             size_label: pageMatch.candidateSize?.label || null, size_system: pageMatch.candidateSize?.system || null, color_label: pageMatch.candidateColor,
             product_match_confidence: pageMatch.confidence, match_type: pageMatch.matchType,
-            price: pagePrice, currency: pageCurrency, url: metadata.canonical_url || inspection.finalUrl,
+            price: pagePrice, currency: pageCurrency, url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : inspection.finalUrl,
+            source_url: inspection.finalUrl, canonical_url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : null,
+            product_gtin: metadata.gtin, product_sku: metadata.sku, product_model_number: metadata.model_number,
             original_price: metadata.original_price, discount_percent: metadata.discount_percent,
             shipping_cost: 0, taxes: 0, total_price: null, delivery_estimate: null,
             shipping_known: false, taxes_known: false, total_is_estimated: true,
             destination_country: userPreferences?.country || null, condition: normalizeProductCondition(metadata.condition),
             availability: metadata.availability, source: "tavily_crawled_page", last_verified_at: new Date().toISOString(),
-            is_verified: pageMatch.confidence >= 0.9,
+            is_verified: pageIdentityConfirmed,
           });
         }
-        if (offerRows.some((offer) => offer.product_match_confidence >= 0.9) || inspectionBudget >= 3) break;
+        if (tavilyPagesInspected >= 2 || inspectionBudget >= maxRetailerPagesPerRefresh) break;
       }
     }
 
     // A configured self-hosted SearXNG instance is a free fallback for broad
     // product-page leads. Every lead is inspected before any offer is saved.
     const searxngBaseUrl = Deno.env.get("SEARXNG_URL")?.trim();
-    if (searxngBaseUrl && !offerRows.some((offer) => offer.product_match_confidence >= 0.9) && retailerPagesInspected < 3) {
-      for (const query of tavilyQueries.slice(0, 2)) {
-        if (inspectionBudget >= 3 || retailerPagesInspected >= 3) break;
+    if (searxngBaseUrl && retailerPagesInspected < maxRetailerPagesPerRefresh) {
+      for (const query of tavilyQueries.slice(0, 1)) {
+        if (searxngPagesInspected >= 1 || inspectionBudget >= maxRetailerPagesPerRefresh) break;
         const cacheInput = `searxng|${query.toLowerCase().replace(/\s+/g, " ").trim()}|${targetCountry}|${userPreferences?.language || "en"}`;
         const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(cacheInput));
         const queryHash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -598,18 +661,20 @@ serve(async (req) => {
         if (!cached) {
           const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SEARXNG_DAILY_SEARCH_LIMIT") || "20", 10) || 20));
           const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "searxng", p_daily_limit: dailyLimit });
-          if (budgetError) searxngSearchError = "The SearXNG daily search budget could not be checked.";
-          else if (reserved !== true) {
+          const budgetState = providerBudgetState(reserved, budgetError);
+          if (budgetState === "unavailable") searxngSearchError = "The SearXNG daily search budget could not be checked.";
+          else if (budgetState === "exhausted") {
             searxngSearchError = "Wishly reached its configured daily SearXNG search budget. Try again tomorrow.";
             await recordProviderMetric(admin, { provider: "searxng", surface: "interactive", outcome: "budget_exhausted", marketCountry: targetCountry });
           } else {
             const startedAt = Date.now();
             let statusCode: number | null = null;
+            let searxErrorCode: ProviderErrorCode | null = null;
             let outcome: "success" | "error" = "error";
             try {
               const result = await searchSearXNG(searxngBaseUrl, query, userPreferences?.language || "en");
               statusCode = result.response.status;
-              if (!result.response.ok) searxngSearchError = `SearXNG returned HTTP ${result.response.status}.`;
+              if (!result.response.ok) { searxErrorCode = classifySearXNGFailure(result.response.status); searxngSearchError = `SearXNG returned HTTP ${result.response.status}.`; }
               else {
                 leads = result.results;
                 searxngSearchAttempted = true;
@@ -622,10 +687,11 @@ serve(async (req) => {
               }
             } catch {
               searxngSearchError = "The configured SearXNG instance could not be reached.";
+              searxErrorCode = "network_error";
             } finally {
               await recordProviderMetric(admin, {
                 provider: "searxng", surface: "interactive", outcome,
-                durationMs: Date.now() - startedAt, resultCount: leads.length, statusCode,
+                durationMs: Date.now() - startedAt, resultCount: leads.length, statusCode, errorCode: searxErrorCode,
                 unitCostUsd: parseEstimatedUnitCost(Deno.env.get("SEARXNG_ESTIMATED_COST_PER_SEARCH_USD")),
                 marketCountry: targetCountry,
               });
@@ -637,7 +703,7 @@ serve(async (req) => {
         }
 
         for (const lead of leads) {
-          if (inspectionBudget >= 3 || retailerPagesInspected >= 3) break;
+          if (searxngPagesInspected >= 1 || inspectionBudget >= maxRetailerPagesPerRefresh) break;
           const domain = getRetailerDomain(lead.url);
           if (!domain || !retailerFromUrl(lead.url) || inspectedDomains.has(domain)) continue;
           inspectedDomains.add(domain);
@@ -662,21 +728,21 @@ serve(async (req) => {
           });
           inspectionBudget++;
           retailerPagesInspected++;
+          searxngPagesInspected++;
           const inspection = await inspectRetailerProductPage(lead.url, retailerDns, retailerTransport);
           const metadata = inspection.metadata;
           if (!inspection.permitted || inspection.errorCode || !metadata?.title) {
-            const restricted = inspection.errorCode === "robots_restricted" || inspection.errorCode === "unsafe_url";
-            const unavailable = inspection.errorCode?.startsWith("http_") || ["fetch_failed", "fetch_unknown"].includes(inspection.errorCode || "");
+            const failure = classifyRetailerFailure(inspection.errorCode, inspection.status);
             if (retailerId) await admin.from("retailers").update({
-              validation_status: restricted ? "restricted" : unavailable ? "temporarily_unavailable" : "discovered",
+              validation_status: failure.status,
               last_inspected_at: new Date().toISOString(), last_error: inspection.errorCode,
-              retry_after: new Date(Date.now() + (restricted ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString(),
-              reliability_score: Math.max(0, Number(existingRetailer?.reliability_score ?? 0.5) - (restricted ? 0.1 : 0.05)),
+              retry_after: new Date(Date.now() + failure.retryAfterMs).toISOString(),
+              reliability_score: Math.max(0, Number(existingRetailer?.reliability_score ?? 0.5) - (failure.status === "restricted" ? 0.1 : failure.status === "temporarily_unavailable" ? 0.02 : 0)),
             }).eq("id", retailerId);
             await admin.from("retailer_discovery_events").insert({
               retailer_id: retailerId, canonical_domain: domain, product_id: item.product_id || null,
               source_provider: "searxng", source_query: queryHash, source_url: inspection.finalUrl,
-              outcome: restricted ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
+              outcome: failure.status === "restricted" ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
               evidence: { status: inspection.status },
             });
             continue;
@@ -684,10 +750,11 @@ serve(async (req) => {
 
           const pageTitle = [metadata.title, metadata.brand, metadata.model_number, metadata.variant_name].filter(Boolean).join(" ");
           const pageMatch = matchListing(pageTitle, matchTarget, [metadata.gtin, metadata.sku], metadata.condition);
-          const pagePrice = metadata.price;
-          const pageCurrency = resolveProviderCurrency(metadata.currency || "", String(item.currency || "USD").toUpperCase());
-          const hasUsableOffer = Boolean(pageMatch && pagePrice && pagePrice > 0 && pageCurrency);
-          const validationError = productOfferEvidenceError(Boolean(pageMatch), pagePrice, pageCurrency);
+          const pagePrice = isProductPriceCurrent(metadata.price, metadata.price_valid_until) ? metadata.price : null;
+          const pageCurrency = resolveProviderCurrency(metadata.currency || "", "");
+          const pageIdentityConfirmed = Boolean(pageMatch && pageMatch.confidence >= 0.9 && !pageMatch.matchType.includes("unconfirmed"));
+          const hasUsableOffer = Boolean(pageIdentityConfirmed && pagePrice && pagePrice > 0 && pageCurrency);
+          const validationError = productOfferEvidenceError(pageIdentityConfirmed, pagePrice, pageCurrency);
           const verifiedRetailer = validationError === null && Boolean(metadata.title);
           const sellerType = classifySeller(inspection.canonicalDomain || domain);
           if (retailerId) await admin.from("retailers").update({
@@ -716,16 +783,18 @@ serve(async (req) => {
             seller_type: sellerType === "unknown" ? existingRetailer?.seller_type || "unknown" : sellerType,
             size_label: pageMatch.candidateSize?.label || null, size_system: pageMatch.candidateSize?.system || null, color_label: pageMatch.candidateColor,
             product_match_confidence: pageMatch.confidence, match_type: pageMatch.matchType,
-            price: pagePrice, currency: pageCurrency, url: metadata.canonical_url || inspection.finalUrl,
+            price: pagePrice, currency: pageCurrency, url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : inspection.finalUrl,
+            source_url: inspection.finalUrl, canonical_url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : null,
+            product_gtin: metadata.gtin, product_sku: metadata.sku, product_model_number: metadata.model_number,
             original_price: metadata.original_price, discount_percent: metadata.discount_percent,
             shipping_cost: 0, taxes: 0, total_price: null, delivery_estimate: null,
             shipping_known: false, taxes_known: false, total_is_estimated: true,
             destination_country: userPreferences?.country || null, condition: normalizeProductCondition(metadata.condition),
             availability: metadata.availability, source: "searxng_crawled_page", last_verified_at: new Date().toISOString(),
-            is_verified: pageMatch.confidence >= 0.9,
+            is_verified: pageIdentityConfirmed,
           });
         }
-        if (offerRows.some((offer) => offer.product_match_confidence >= 0.9) || inspectionBudget >= 3) break;
+        if (searxngPagesInspected >= 1 || inspectionBudget >= maxRetailerPagesPerRefresh) break;
       }
     }
 
@@ -734,12 +803,14 @@ serve(async (req) => {
     let openRouterSearchError: string | null = null;
     const openRouterEnabled = allowExpandedSearch && Deno.env.get("OPENROUTER_ALLOW_PAID_SEARCH") === "true" && Boolean(openRouterKey);
     if (allowExpandedSearch && !openRouterEnabled && openRouterKey) openRouterSearchError = "OpenRouter web search is disabled by project configuration.";
-    if (!offerRows.some((offer) => offer.product_match_confidence >= 0.9) && retailerPagesInspected < 3 && openRouterEnabled) {
+    if (openRouterEnabled) {
       const openRouterLimit = Deno.env.get("OPENROUTER_DAILY_REQUEST_LIMIT") || Deno.env.get("OPENROUTER_DAILY_SEARCH_LIMIT") || "8";
       const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(openRouterLimit, 10) || 8));
       const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "openrouter", p_daily_limit: dailyLimit });
-      if (budgetError) throw budgetError;
-      if (reserved !== true) {
+      const budgetState = providerBudgetState(reserved, budgetError);
+      if (budgetState === "unavailable") {
+        openRouterSearchError = "OpenRouter budget could not be checked; completed searches will be kept.";
+      } else if (budgetState === "exhausted") {
         openRouterSearchError = "Wishly reached its configured daily web-search budget. Try again tomorrow.";
         await recordProviderMetric(admin, { provider: "openrouter", surface: "interactive", outcome: "budget_exhausted", marketCountry: targetCountry });
       }
@@ -750,16 +821,10 @@ serve(async (req) => {
       let searchCount: number | null = null;
       let statusCode: number | null = null;
       let outcome: "success" | "error" = "error";
+      let openRouterErrorCode: ProviderErrorCode | null = null;
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 20000);
         let response: Response;
-        try {
-          response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${openRouterKey}`, "Content-Type": "application/json" },
-            signal: controller.signal,
-            body: JSON.stringify({
+        response = await requestOpenRouter(openRouterKey!, {
               model: Deno.env.get("OPENROUTER_MODEL") || "openai/gpt-4o-mini",
               tools: [{ type: "openrouter:web_search", parameters: { engine: "exa", max_results: 6, max_total_results: 12, max_uses: 2, search_context_size: "low" } }],
               max_tool_calls: 4,
@@ -767,9 +832,7 @@ serve(async (req) => {
                 { role: "system", content: "You must use openrouter:web_search to search for real direct retailer product pages for the exact product. Search using the brand, manufacturer model, identifiers, and exact variant below. Do not infer or invent a price, currency, stock status, shipping, or a retailer listing. The application will only use your web-search source citations and will independently validate them." },
                 { role: "user", content: `Find retailer listings for this exact product and variant: ${JSON.stringify({ brand: item.brand, model: item.model_number, gtin: item.gtin, title: productTitle, variant: item.variant_label }).slice(0, 1000)}. Search broadly across public retailer websites.` },
               ],
-            }),
-          });
-        } finally { clearTimeout(timeout); }
+            });
         statusCode = response.status;
         if (response.ok) {
           const result = await response.json();
@@ -792,7 +855,7 @@ serve(async (req) => {
             // A search citation is a lead only. Fetch the public page through the
             // same robots-aware, SSRF-safe inspector before saving any offer.
             const domain = getRetailerDomain(offerUrl);
-            if (!domain || inspectedDomains.has(domain) || retailerPagesInspected >= 3) continue;
+            if (!domain || inspectedDomains.has(domain) || retailerPagesInspected >= maxRetailerPagesPerRefresh) continue;
             inspectedDomains.add(domain);
             const { data: matchedRetailers } = await admin.from("retailers").select("id,name,retry_after,seller_type,reliability_score")
               .eq("canonical_domain", domain).limit(1);
@@ -817,25 +880,25 @@ serve(async (req) => {
             const inspection = await inspectRetailerProductPage(offerUrl, retailerDns, retailerTransport);
             const metadata = inspection.metadata;
             if (!inspection.permitted || inspection.errorCode || !metadata?.title) {
-              const restricted = inspection.errorCode === "robots_restricted" || inspection.errorCode === "unsafe_url";
+              const failure = classifyRetailerFailure(inspection.errorCode, inspection.status);
               if (retailerId) await admin.from("retailers").update({
-              validation_status: restricted ? "restricted" : inspection.errorCode?.startsWith("http_") || ["fetch_failed", "fetch_unknown"].includes(inspection.errorCode || "") ? "temporarily_unavailable" : "discovered",
+              validation_status: failure.status,
                 last_inspected_at: new Date().toISOString(), last_error: inspection.errorCode || "product_metadata_missing",
-                retry_after: new Date(Date.now() + (restricted ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString(),
-              reliability_score: Math.max(0, Number(knownRetailer?.reliability_score ?? 0.5) - (restricted ? 0.1 : 0.05)),
+                retry_after: new Date(Date.now() + failure.retryAfterMs).toISOString(),
+              reliability_score: Math.max(0, Number(knownRetailer?.reliability_score ?? 0.5) - (failure.status === "restricted" ? 0.1 : failure.status === "temporarily_unavailable" ? 0.02 : 0)),
               }).eq("id", retailerId);
               await admin.from("retailer_discovery_events").insert({
                 retailer_id: retailerId, canonical_domain: domain, product_id: item.product_id || null,
                 source_provider: "openrouter", source_query: "openrouter-web-search", source_url: inspection.finalUrl,
-                outcome: restricted ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
+                outcome: failure.status === "restricted" ? "restricted" : "inspection_failed", error_code: inspection.errorCode || "product_metadata_missing",
                 evidence: { status: inspection.status },
               });
               continue;
             }
             const pageTitle = [metadata.title, metadata.brand, metadata.model_number, metadata.variant_name].filter(Boolean).join(" ");
             const pageMatch = matchListing(pageTitle, matchTarget, [metadata.gtin], metadata.condition);
-            const pagePrice = metadata.price;
-            const pageCurrency = resolveProviderCurrency(metadata.currency || "", String(item.currency || "USD").toUpperCase());
+            const pagePrice = isProductPriceCurrent(metadata.price, metadata.price_valid_until) ? metadata.price : null;
+            const pageCurrency = resolveProviderCurrency(metadata.currency || "", "");
             const validationError = productOfferEvidenceError(Boolean(pageMatch), pagePrice, pageCurrency);
             const verifiedRetailer = validationError === null && Boolean(metadata.title);
             if (retailerId) await admin.from("retailers").update({
@@ -855,7 +918,8 @@ serve(async (req) => {
               error_code: validationError,
               evidence: { title: metadata.title, has_price: pagePrice != null, currency: metadata.currency, has_image: Boolean(metadata.image_url), variant_count: metadata.variants.length },
             });
-            if (!pageMatch || !pagePrice || pagePrice <= 0 || !pageCurrency) continue;
+            const pageIdentityConfirmed = Boolean(pageMatch && pageMatch.confidence >= 0.9 && !pageMatch.matchType.includes("unconfirmed"));
+            if (!pageIdentityConfirmed || !pagePrice || pagePrice <= 0 || !pageCurrency) continue;
             const existing = offerRows.find((offer) => offer.url === (metadata.canonical_url || inspection.finalUrl));
             if (existing) continue;
             offerRows.push({
@@ -864,57 +928,76 @@ serve(async (req) => {
               seller_type: classifySeller(domain) === "unknown" ? knownRetailer?.seller_type || "unknown" : classifySeller(domain),
               size_label: pageMatch.candidateSize?.label || null, size_system: pageMatch.candidateSize?.system || null, color_label: pageMatch.candidateColor,
               product_match_confidence: pageMatch.confidence, match_type: pageMatch.matchType,
-              price: pagePrice, currency: pageCurrency, url: metadata.canonical_url || inspection.finalUrl,
+              price: pagePrice, currency: pageCurrency, url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : inspection.finalUrl,
+              source_url: inspection.finalUrl, canonical_url: metadata.canonical_url && getRetailerDomain(metadata.canonical_url) === domain ? metadata.canonical_url : null,
+              product_gtin: metadata.gtin, product_sku: metadata.sku, product_model_number: metadata.model_number,
               original_price: metadata.original_price, discount_percent: metadata.discount_percent,
               shipping_cost: 0, taxes: 0, total_price: null, shipping_known: false, taxes_known: false, total_is_estimated: true,
               destination_country: userPreferences?.country || null,
               condition: pageMatch.candidateCondition, availability: metadata.availability,
               source: "openrouter_crawled_page", last_verified_at: new Date().toISOString(),
-              is_verified: pageMatch.confidence >= 0.9,
+              is_verified: pageIdentityConfirmed,
             });
           }
         } else {
-          openRouterSearchError = response.status === 401
-            ? "OpenRouter rejected its API key. Check OPENROUTER_API_KEY in Supabase Edge Function secrets."
-            : response.status === 402
-              ? "OpenRouter has insufficient credits for web search. Check the OpenRouter account balance."
-              : response.status === 403
-                ? "OpenRouter web search is not available for this account or model. Check its server-tool access."
-                : "OpenRouter web search is temporarily unavailable.";
+          const failureBody = await response.text();
+          openRouterErrorCode = classifyOpenRouterFailure(response.status, failureBody) as ProviderErrorCode;
+          openRouterSearchError = describeOpenRouterFailure(openRouterErrorCode as Parameters<typeof describeOpenRouterFailure>[0]);
         }
       } catch {
         openRouterSearchError = "OpenRouter web search could not be reached.";
+        openRouterErrorCode = "network_error";
       } finally {
         await recordProviderMetric(admin, {
           provider: "openrouter", surface: "interactive", outcome, durationMs: Date.now() - searchStartedAt,
           resultCount, searchCount, statusCode, unitCostUsd: parseEstimatedUnitCost(Deno.env.get("OPENROUTER_ESTIMATED_COST_PER_SEARCH_USD")),
-          marketCountry: targetCountry,
+          marketCountry: targetCountry, errorCode: openRouterErrorCode,
         });
       }
       }
     }
     const uniqueOffers = await addOfferCurrencyConversions(
-      [...new Map(offerRows.map((offer) => [`${offer.source}:${offer.url}`, offer])).values()].slice(0, 12),
+      [...new Map(offerRows.map((offer) => [`${offer.source}:${offer.url}`, withOfferVerificationEvidence(offer)])).values()].slice(0, 12),
       String(userPreferences?.currency || item.currency || "USD"),
     );
-    const exactOffers = uniqueOffers.filter((offer) => offer.is_verified === true && offer.product_match_confidence >= 0.9 && !String(offer.match_type).includes("unconfirmed"));
+    const exactOffers = uniqueOffers.filter((offer) => offer.is_verified === true && offer.product_match_confidence >= 0.9
+      && !String(offer.match_type).includes("unconfirmed") && offer.availability !== "out_of_stock" && offer.verification_status !== "unavailable");
     const possibleOfferCount = uniqueOffers.length - exactOffers.length;
+    const providerFailureCount = shoppingFailures + (tavilySearchError ? 1 : 0) + (searxngSearchError ? 1 : 0) + (openRouterSearchError ? 1 : 0);
+    const providerConfigured = Boolean(apiKey || searxngBaseUrl || (tavilyEnabled && tavilyKey) || (openRouterEnabled && openRouterKey));
+    const searchIncomplete = !providerConfigured || providerFailureCount > 0 || shoppingBudgetReached
+      || Boolean(tavilySearchError || searxngSearchError || openRouterSearchError);
 
     if (uniqueOffers.length) {
-      const { data: saved, error } = await admin.from("store_offers").upsert(uniqueOffers, { onConflict: "item_id,source,url" }).select("id,store,price,currency,source,url,availability,last_verified_at,is_verified");
+      const existingResult = await admin.from("store_offers").select("source,url,is_verified,verification_status").eq("item_id", item.id).in("url", uniqueOffers.map((offer) => offer.url));
+      if (existingResult.error) {
+        const retry = await deferPersistenceRetry(admin, item, stamp, "offer_upsert");
+        return reply({ error: "Offers could not be checked safely before saving; existing offers were preserved and a retry was scheduled.", retry_scheduled: retry.scheduled }, 503);
+      }
+      const safeOffers = preserveExistingVerifiedOffers(existingResult.data || [], uniqueOffers);
+      const { data: saved, error } = safeOffers.length
+        ? await admin.from("store_offers").upsert(safeOffers, { onConflict: "item_id,source,url" }).select("id,store,price,currency,source,url,availability,last_verified_at,is_verified")
+        : { data: [], error: null };
       if (error) {
         const retry = await deferPersistenceRetry(admin, item, stamp, "offer_upsert");
         return reply({ error: retry.scheduled ? "Offers were found, but Wishly could not save them. A retry is scheduled." : "Offers were found, but Wishly could not save them or schedule a retry.", retry_scheduled: retry.scheduled }, 503);
       }
+      offersPersisted += saved?.length || 0;
       const history = await recordOfferPriceObservations(admin, item.id, saved || [], stamp);
       if (history.failed) {
         const retry = await deferPersistenceRetry(admin, item, stamp, "price_history");
         return reply({ error: retry.scheduled ? "Offers were saved, but their price history could not be recorded. A retry is scheduled." : "Offers were saved, but their price history could not be recorded or scheduled for retry.", retry_scheduled: retry.scheduled }, 503);
       }
     }
-    const status = exactOffers.length ? "offers_available" : possibleOfferCount ? "partial" : "no_matches";
-    const errorMessage = exactOffers.length
-      ? null
+    const researchOutcome = deriveResearchOutcome({
+      verifiedOffers: exactOffers.length, candidates: possibleOfferCount, providerFailures: providerFailureCount,
+      budgetReached: shoppingBudgetReached, configured: providerConfigured,
+    });
+    const status = researchOutcome.status;
+    const errorMessage = searchIncomplete
+      ? exactOffers.length || possibleOfferCount
+        ? `Some configured search sources failed or reached their budget; ${exactOffers.length ? `${exactOffers.length} verified offer${exactOffers.length === 1 ? "" : "s"} remain available` : `${possibleOfferCount} unverified candidate${possibleOfferCount === 1 ? "" : "s"} were found`}.`
+        : searxngSearchError || tavilySearchError || openRouterSearchError || shoppingSearchError || "Configured search sources failed; saved offers were retained and refresh should be retried."
       : possibleOfferCount
         ? `Found ${possibleOfferCount} retailer-search result${possibleOfferCount === 1 ? "" : "s"}, but none has been confirmed on its product page yet.`
         : searxngSearchError
@@ -938,19 +1021,27 @@ serve(async (req) => {
             : !openRouterEnabled && !apiKey
               ? "No search provider is configured. Add SERPAPI_KEY for Google Shopping and OPENROUTER_API_KEY for broader web search."
               : shoppingSearchError || "No exact retailer listing was found in the configured search sources.");
-    await admin.from("items").update({ enrichment_status: status, offers_last_checked_at: stamp, enrichment_error: errorMessage }).eq("id", item.id);
+    const { error: statusError } = await admin.from("items").update({ enrichment_status: status, offers_last_checked_at: stamp, enrichment_error: errorMessage }).eq("id", item.id);
+    if (statusError) {
+      const retry = await deferPersistenceRetry(admin, item, stamp, "offer_upsert");
+      return reply({ error: "Offers were checked, but their refresh status could not be saved.", retry_scheduled: retry.scheduled }, 503);
+    }
     const refreshIntervalHours = item.target_price != null ? 2 : 6;
-    await admin.from("items").update({
+    const { error: scheduleError } = await admin.from("items").update({
       last_offer_search_at: stamp,
       next_offer_search_at: new Date(Date.parse(stamp) + refreshIntervalHours * 60 * 60 * 1000).toISOString(),
     }).eq("id", item.id);
+    if (scheduleError) {
+      const retry = await deferPersistenceRetry(admin, item, stamp, "offer_upsert");
+      return reply({ error: "Offers were checked, but the next refresh could not be scheduled.", retry_scheduled: retry.scheduled }, 503);
+    }
     if (item.product_id) await admin.from("products").update({ offers_last_checked_at: stamp, offer_search_status: status }).eq("id", item.product_id);
     const durationMs = Date.now() - researchStartedAt;
     const webSearchCount = openRouterSearchAttempted ? 1 : 0;
     console.info(JSON.stringify({ event: "wishly_offer_research", providers: [apiKey ? "serpapi_google_shopping" : null, tavilySearchAttempted ? "tavily" : null, searxngSearchAttempted ? "searxng" : null, webSearchCount ? "openrouter_web_search" : null].filter(Boolean), provider_queries: shoppingQueryCount + tavilyQueriesCount + searxngQueriesCount + webSearchCount, shopping_queries: shoppingQueryCount, tavily_queries: tavilyQueriesCount, searxng_queries: searxngQueriesCount, retailer_pages_inspected: retailerPagesInspected, web_searches: webSearchCount, provider_failures: shoppingFailures + (tavilySearchError ? 1 : 0) + (searxngSearchError ? 1 : 0) + (openRouterSearchError ? 1 : 0), daily_budget_reached: shoppingBudgetReached || Boolean(tavilySearchError?.includes("daily Tavily")) || Boolean(searxngSearchError?.includes("daily SearXNG")) || Boolean(openRouterSearchError?.includes("daily web-search budget")), offers_found: uniqueOffers.length, exact_offers_found: exactOffers.length, duration_ms: durationMs }));
     return reply({
-      configured: Boolean(apiKey || searxngBaseUrl || (tavilyEnabled && tavilyKey) || (openRouterEnabled && openRouterKey)), status, offers_found: uniqueOffers.length,
-      exact_offers_found: exactOffers.length, possible_offers_found: possibleOfferCount,
+      success: researchOutcome.success, partial: researchOutcome.partial, configured: providerConfigured, status, offers_found: uniqueOffers.length,
+      exact_offers_found: exactOffers.length, possible_offers_found: possibleOfferCount, offers_persisted: offersPersisted,
       provider_queries: shoppingQueryCount + tavilyQueriesCount + searxngQueriesCount + webSearchCount, shopping_queries: shoppingQueryCount,
       tavily_queries: tavilyQueriesCount, searxng_queries: searxngQueriesCount, retailer_pages_inspected: retailerPagesInspected, web_searches: webSearchCount,
       provider_failures: shoppingFailures + (tavilySearchError ? 1 : 0) + (searxngSearchError ? 1 : 0) + (openRouterSearchError ? 1 : 0), duration_ms: durationMs,

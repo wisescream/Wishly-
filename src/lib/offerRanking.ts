@@ -10,6 +10,8 @@ export interface OfferPriceEvidence {
 
 export interface OfferFreshnessEvidence {
   last_verified_at?: string | null;
+  last_checked_at?: string | null;
+  is_verified?: boolean;
   availability?: string | null;
 }
 
@@ -20,7 +22,7 @@ export function compareOfferFreshnessAndAvailability(
   now = Date.now(),
 ): number {
   const freshnessRank = (offer: OfferFreshnessEvidence) => {
-    const checkedAt = Date.parse(offer.last_verified_at || '');
+    const checkedAt = Date.parse((offer.is_verified ? offer.last_verified_at : offer.last_checked_at || offer.last_verified_at) || '');
     return Number.isFinite(checkedAt) && checkedAt <= now && now - checkedAt <= 24 * 60 * 60 * 1000 ? 0 : 1;
   };
   const stockRank = (value?: string | null) => {

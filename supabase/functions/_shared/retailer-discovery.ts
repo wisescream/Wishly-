@@ -1,4 +1,4 @@
-import { fetchPinnedProductPage, type PinnedFetchTransport } from "./pinned-fetch.ts";
+import { fetchPinnedProductPage, type PinnedFetchTransport, type PinnedHttpResponse } from "./pinned-fetch.ts";
 import { parseProductMetadata } from "./product-metadata.ts";
 import { isPrivateOrReservedIpv4, validateProductFetchUrl, type DnsResolver } from "./url-security.ts";
 
@@ -115,6 +115,22 @@ export function robotsTxtAllowsPath(robots: string, pathname: string, userAgent 
   return rules[0]?.allow ?? true;
 }
 
+export type RetailerRobotsAccess = "allowed" | "restricted" | "temporarily_unavailable";
+export type RetailerFailureStatus = "restricted" | "temporarily_unavailable" | "discovered";
+export type RetailerFailureClass = "restricted" | "temporary_outage" | "permanently_unavailable" | "unsupported_format" | "unconfirmed";
+
+export function classifyRetailerFailure(errorCode: string | null | undefined, httpStatus: number | null = null): { status: RetailerFailureStatus; class: RetailerFailureClass; retryAfterMs: number } {
+  if (errorCode === "robots_restricted" || httpStatus === 401 || httpStatus === 403) return { status: "restricted", class: "restricted", retryAfterMs: 30 * 24 * 60 * 60 * 1000 };
+  if (errorCode === "robots_unavailable" || errorCode === "fetch_failed" || errorCode === "fetch_unknown" || errorCode === "response_truncated" || httpStatus === 429 || (httpStatus != null && httpStatus >= 500)) {
+    return { status: "temporarily_unavailable", class: "temporary_outage", retryAfterMs: 24 * 60 * 60 * 1000 };
+  }
+  if (errorCode === "unsupported_format") return { status: "discovered", class: "unsupported_format", retryAfterMs: 30 * 24 * 60 * 60 * 1000 };
+  if (httpStatus === 404 || httpStatus === 410 || errorCode === "cross_domain_product_redirect" || errorCode === "unsafe_url" || errorCode === "invalid_url") {
+    return { status: "discovered", class: "permanently_unavailable", retryAfterMs: 30 * 24 * 60 * 60 * 1000 };
+  }
+  return { status: "discovered", class: "unconfirmed", retryAfterMs: 7 * 24 * 60 * 60 * 1000 };
+}
+
 type Inspection = {
   permitted: boolean;
   status: number | null;
@@ -124,7 +140,7 @@ type Inspection = {
   errorCode: string | null;
 };
 
-const robotsCache = new Map<string, { at: number; body: string | null; denied: boolean }>();
+const robotsCache = new Map<string, { expiresAt: number; body: string | null; access: RetailerRobotsAccess }>();
 async function pinnedGet(url: string, resolveDns: DnsResolver, transport: PinnedFetchTransport, timeoutMs: number, maxBodyBytes: number, checkRedirectRobots = false) {
   return await fetchPinnedProductPage(url, resolveDns, transport, {
     timeoutMs, maxBodyBytes, maxRedirects: 3,
@@ -132,20 +148,27 @@ async function pinnedGet(url: string, resolveDns: DnsResolver, transport: Pinned
   });
 }
 
-async function robotsAllowed(url: URL, resolveDns: DnsResolver, transport: PinnedFetchTransport): Promise<boolean> {
+export async function retailerRobotsAccess(url: URL, resolveDns: DnsResolver, transport: PinnedFetchTransport): Promise<RetailerRobotsAccess> {
   const host = url.hostname.toLowerCase();
   const cached = robotsCache.get(host);
-  let rules = cached && Date.now() - cached.at < 6 * 60 * 60 * 1000 ? cached : null;
+  let rules = cached && cached.expiresAt > Date.now() ? cached : null;
   if (!rules) {
     try {
       const response = await pinnedGet(`${url.origin}/robots.txt`, resolveDns, transport, 4000, 128 * 1024);
-      if (response.status === 404 || response.status === 410) rules = { at: Date.now(), body: "", denied: false };
-      else if (response.status >= 200 && response.status < 300 && !response.truncated) rules = { at: Date.now(), body: new TextDecoder().decode(response.body), denied: false };
-      else rules = { at: Date.now(), body: null, denied: true };
-    } catch { rules = { at: Date.now(), body: null, denied: true }; }
+      const at = Date.now();
+      if (response.status === 404 || response.status === 410) rules = { expiresAt: at + 6 * 60 * 60 * 1000, body: "", access: "allowed" };
+      else if (response.status >= 200 && response.status < 300 && !response.truncated) rules = { expiresAt: at + 6 * 60 * 60 * 1000, body: new TextDecoder().decode(response.body), access: "allowed" };
+      else if (response.status === 401 || response.status === 403) rules = { expiresAt: at + 24 * 60 * 60 * 1000, body: null, access: "restricted" };
+      else rules = { expiresAt: at + 5 * 60 * 1000, body: null, access: "temporarily_unavailable" };
+    } catch { rules = { expiresAt: Date.now() + 5 * 60 * 1000, body: null, access: "temporarily_unavailable" }; }
     robotsCache.set(host, rules);
   }
-  return !rules.denied && robotsTxtAllowsPath(rules.body || "", `${url.pathname}${url.search}`);
+  if (rules.access !== "allowed") return rules.access;
+  return robotsTxtAllowsPath(rules.body || "", `${url.pathname}${url.search}`) ? "allowed" : "restricted";
+}
+
+async function robotsAllowed(url: URL, resolveDns: DnsResolver, transport: PinnedFetchTransport): Promise<boolean> {
+  return (await retailerRobotsAccess(url, resolveDns, transport)) === "allowed";
 }
 
 export async function retailerPageRobotsAllowed(rawUrl: string, resolveDns: DnsResolver, transport: PinnedFetchTransport): Promise<boolean> {
@@ -156,26 +179,50 @@ export async function retailerPageRobotsAllowed(rawUrl: string, resolveDns: DnsR
   } catch { return false; }
 }
 
+export async function retailerPageRobotsDecision(rawUrl: string, resolveDns: DnsResolver, transport: PinnedFetchTransport): Promise<RetailerRobotsAccess> {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "restricted";
+    return await retailerRobotsAccess(url, resolveDns, transport);
+  } catch { return "restricted"; }
+}
+
 export async function inspectRetailerProductPage(rawUrl: string, resolveDns: DnsResolver, transport: PinnedFetchTransport): Promise<Inspection> {
   const domain = getRetailerDomain(rawUrl);
   if (!domain) return { permitted: false, status: null, finalUrl: rawUrl, canonicalDomain: null, metadata: null, errorCode: "invalid_url" };
   let parsedUrl: URL;
   try { parsedUrl = new URL(rawUrl); } catch { return { permitted: false, status: null, finalUrl: rawUrl, canonicalDomain: domain, metadata: null, errorCode: "invalid_url" }; }
-  if (!await robotsAllowed(parsedUrl, resolveDns, transport)) return { permitted: false, status: null, finalUrl: rawUrl, canonicalDomain: domain, metadata: null, errorCode: "robots_restricted" };
+  const initialRobots = await retailerRobotsAccess(parsedUrl, resolveDns, transport);
+  if (initialRobots !== "allowed") return { permitted: false, status: null, finalUrl: rawUrl, canonicalDomain: domain, metadata: null, errorCode: initialRobots === "restricted" ? "robots_restricted" : "robots_unavailable" };
   const checked = await validateProductFetchUrl(rawUrl, resolveDns);
   if (!checked.safe || !checked.url) return { permitted: false, status: null, finalUrl: rawUrl, canonicalDomain: domain, metadata: null, errorCode: "unsafe_url" };
   try {
-    const response = await pinnedGet(rawUrl, resolveDns, transport, 8000, 2 * 1024 * 1024, true);
+    let redirectRobotsUnavailable = false;
+    let response: PinnedHttpResponse;
+    try {
+      response = await fetchPinnedProductPage(rawUrl, resolveDns, transport, {
+        timeoutMs: 8000, maxBodyBytes: 2 * 1024 * 1024, maxRedirects: 3,
+        onRedirect: async (target) => {
+          const access = await retailerRobotsAccess(target, resolveDns, transport);
+          if (access === "temporarily_unavailable") redirectRobotsUnavailable = true;
+          return access === "allowed";
+        },
+      });
+    } catch (error) {
+      const errorCode = redirectRobotsUnavailable ? "robots_unavailable" : error instanceof Error && error.message.toLowerCase().includes("robots.txt") ? "robots_restricted" : error instanceof Error ? "fetch_failed" : "fetch_unknown";
+      return { permitted: true, status: null, finalUrl: rawUrl, canonicalDomain: domain, metadata: null, errorCode };
+    }
     const finalDomain = getRetailerDomain(response.finalUrl.href);
+    if (finalDomain !== domain) return { permitted: true, status: response.status, finalUrl: response.finalUrl.href, canonicalDomain: finalDomain, metadata: null, errorCode: "cross_domain_product_redirect" };
     const contentType = response.headers.get("content-type")?.toLowerCase() || "";
     if (response.status < 200 || response.status >= 300) return { permitted: true, status: response.status, finalUrl: response.finalUrl.href, canonicalDomain: finalDomain, metadata: null, errorCode: `http_${response.status}` };
-    if (!contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) return { permitted: true, status: response.status, finalUrl: response.finalUrl.href, canonicalDomain: finalDomain, metadata: null, errorCode: "not_html" };
+    if (!contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) return { permitted: true, status: response.status, finalUrl: response.finalUrl.href, canonicalDomain: finalDomain, metadata: null, errorCode: "unsupported_format" };
     const html = new TextDecoder().decode(response.body);
     const metadata = parseProductMetadata(html, response.finalUrl.href);
     metadata.canonical_url = safeCanonicalProductUrl(metadata.canonical_url, response.finalUrl.href);
     return { permitted: true, status: response.status, finalUrl: response.finalUrl.href, canonicalDomain: finalDomain, metadata, errorCode: metadata.title ? null : "product_metadata_missing" };
   } catch (error) {
-    const errorCode = error instanceof Error && error.message.toLowerCase().includes("robots.txt") ? "robots_restricted" : error instanceof Error ? "fetch_failed" : "fetch_unknown";
+    const errorCode = error instanceof Error ? "fetch_failed" : "fetch_unknown";
     return { permitted: true, status: null, finalUrl: rawUrl, canonicalDomain: domain, metadata: null, errorCode };
   }
 }

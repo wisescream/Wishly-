@@ -11,6 +11,14 @@ export interface TavilySearchResponse {
   error: string | null;
 }
 
+export function classifyTavilyFailure(status: number): "invalid_api_key" | "insufficient_credits" | "rate_limited" | "provider_unavailable" | "provider_error" {
+  if (status === 401 || status === 403) return "invalid_api_key";
+  if (status === 402) return "insufficient_credits";
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "provider_unavailable";
+  return "provider_error";
+}
+
 export function buildRetailerQueries(input: {
   title: string;
   brand?: string | null;
@@ -86,13 +94,14 @@ export async function searchTavily(
   query: string,
   fetcher: typeof fetch = fetch,
   includeDomains: string[] = [],
+  timeoutMs = 12_000,
 ): Promise<{ response: Response; data: TavilySearchResponse }> {
   const domains = [...new Set(includeDomains.map((domain) => domain.toLowerCase().replace(/^www\./, "")).filter((domain) => /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain)))].slice(0, 20);
   const response = await fetcher("https://api.tavily.com/search", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ query, topic: "general", search_depth: "basic", max_results: 8, ...(domains.length ? { include_domains: domains } : {}), include_answer: false, include_raw_content: false }),
-    signal: AbortSignal.timeout(12_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) return { response, data: { results: [], answer: null, error: `Tavily returned HTTP ${response.status}.` } };
   let payload: unknown;

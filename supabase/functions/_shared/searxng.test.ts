@@ -45,4 +45,41 @@ describe("SearXNG web-search fallback", () => {
     expect(failed.response.status).toBe(503);
     expect(failed.results).toEqual([]);
   });
+
+  it("retries 429 once with bounded jitter, then cools down without another request", async () => {
+    let now = 1000;
+    const fetcher = vi.fn(async () => new Response("limited", { status: 429 }));
+    const sleep = vi.fn(async () => {});
+    const options = { now: () => now, random: () => 0.5, sleep };
+    const first = await searchSearXNG("https://rate-test.example", "shoes", "en", fetcher as typeof fetch, options);
+    expect(first.response.status).toBe(429);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(2_000);
+    const cooled = await searchSearXNG("https://rate-test.example", "boots", "en", fetcher as typeof fetch, options);
+    expect(cooled.response.status).toBe(429);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    now += 60_001;
+    const recovered = await searchSearXNG("https://rate-test.example", "boots", "en", async () => new Response(JSON.stringify({ results: [] }), { status: 200 }), options);
+    expect(recovered.response.status).toBe(200);
+  });
+
+  it("honors Retry-After on 429 while capping the delay", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response("limited", { status: 429, headers: { "Retry-After": "7" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    const sleep = vi.fn(async () => {});
+    const result = await searchSearXNG("https://retry-after-test.example", "coat", "en", fetcher as typeof fetch, {
+      now: () => 10_000, random: () => 0, sleep,
+    });
+    expect(result.response.status).toBe(200);
+    expect(sleep).toHaveBeenCalledWith(7_000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts timed out requests", async () => {
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }));
+    await expect(searchSearXNG("https://timeout-test.example", "shoes", "en", fetcher as typeof fetch, { timeoutMs: 1 })).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
