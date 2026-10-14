@@ -222,6 +222,7 @@ serve(async (req) => {
     let offersPersisted = 0;
     let inspectionBudget = 0;
     let tavilyPagesInspected = 0;
+    const maxTavilyPagesPerRefresh = 4;
     let searxngPagesInspected = 0;
     const maxRetailerPagesPerRefresh = 6;
     const inspectedDomains = new Set<string>();
@@ -541,7 +542,7 @@ serve(async (req) => {
         }
 
         for (const lead of candidates) {
-          if (tavilyPagesInspected >= 2 || inspectionBudget >= maxRetailerPagesPerRefresh) break;
+          if (tavilyPagesInspected >= maxTavilyPagesPerRefresh || inspectionBudget >= maxRetailerPagesPerRefresh) break;
           const domain = getRetailerDomain(lead.url);
           if (!domain || !retailerFromUrl(lead.url) || inspectedDomains.has(domain)) continue;
           inspectedDomains.add(domain);
