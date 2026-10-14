@@ -12,7 +12,7 @@ import { buildMarketProductSearchQueries } from "../_shared/product-search.ts";
 import { deferPersistenceRetry, recordOfferPriceObservations } from "../_shared/research-persistence.ts";
 import { compareProductConditions, normalizeProductCondition } from "../_shared/product-condition.ts";
 import { buildRetailerQueries, classifyTavilyFailure, searchTavily } from "../_shared/tavily.ts";
-import { classifySearXNGFailure, parseSearXNGResponse, searchSearXNG } from "../_shared/searxng.ts";
+import { classifySearXNGFailure, isSearXNGCooldownCache, parseSearXNGResponse, searchSearXNG, searXNGCooldownCacheKey, searXNGCooldownCacheValue, searXNGPersistedCooldownMs } from "../_shared/searxng.ts";
 import { classifyRetailerFailure, classifySeller, getRetailerDomain, inferRetailerCountry, inspectRetailerProductPage, productOfferEvidenceError, selectRetailerInspectionTargets } from "../_shared/retailer-discovery.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
 import { isRetailerUrl } from "../_shared/web-search.ts";
@@ -657,8 +657,16 @@ serve(async (req) => {
         const now = new Date().toISOString();
         const { data: cached } = await admin.from("retailer_search_cache").select("results")
           .eq("query_hash", queryHash).eq("provider", "searxng").gt("expires_at", now).maybeSingle();
+        const cooldownHash = await searXNGCooldownCacheKey(searxngBaseUrl);
+        const { data: cooldown } = cooldownHash
+          ? await admin.from("retailer_search_cache").select("results").eq("query_hash", cooldownHash)
+            .eq("provider", "searxng").gt("expires_at", now).maybeSingle()
+          : { data: null };
         let leads = Array.isArray(cached?.results) ? parseSearXNGResponse({ results: cached.results }) : [];
-        if (!cached) {
+        if (isSearXNGCooldownCache(cooldown?.results)) {
+          searxngSearchError = "SearXNG is temporarily rate-limited; Wishly skipped it during cooldown and continued with other configured sources.";
+          await recordProviderMetric(admin, { provider: "searxng", surface: "interactive", outcome: "error", errorCode: "rate_limited", marketCountry: targetCountry });
+        } else if (!cached) {
           const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SEARXNG_DAILY_SEARCH_LIMIT") || "20", 10) || 20));
           const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "searxng", p_daily_limit: dailyLimit });
           const budgetState = providerBudgetState(reserved, budgetError);
@@ -674,7 +682,18 @@ serve(async (req) => {
             try {
               const result = await searchSearXNG(searxngBaseUrl, query, userPreferences?.language || "en");
               statusCode = result.response.status;
-              if (!result.response.ok) { searxErrorCode = classifySearXNGFailure(result.response.status); searxngSearchError = `SearXNG returned HTTP ${result.response.status}.`; }
+              if (!result.response.ok) {
+                searxErrorCode = classifySearXNGFailure(result.response.status);
+                searxngSearchError = result.response.status === 429
+                  ? "SearXNG returned HTTP 429 (rate limited); Wishly will cool it down and continue with other configured sources."
+                  : `SearXNG returned HTTP ${result.response.status}.`;
+                if (result.response.status === 429 && cooldownHash) {
+                  await admin.from("retailer_search_cache").upsert({
+                    query_hash: cooldownHash, provider: "searxng", results: searXNGCooldownCacheValue(),
+                    expires_at: new Date(Date.now() + searXNGPersistedCooldownMs).toISOString(),
+                  }, { onConflict: "query_hash" });
+                }
+              }
               else {
                 leads = result.results;
                 searxngSearchAttempted = true;
@@ -994,10 +1013,18 @@ serve(async (req) => {
       budgetReached: shoppingBudgetReached, configured: providerConfigured,
     });
     const status = researchOutcome.status;
+    const providerIssues = [
+      apiKey ? shoppingSearchError : null,
+      allowExpandedSearch ? tavilySearchError : null,
+      searxngSearchError,
+      allowExpandedSearch ? openRouterSearchError : null,
+    ].filter((message): message is string => Boolean(message));
     const errorMessage = searchIncomplete
       ? exactOffers.length || possibleOfferCount
         ? `Some configured search sources failed or reached their budget; ${exactOffers.length ? `${exactOffers.length} verified offer${exactOffers.length === 1 ? "" : "s"} remain available` : `${possibleOfferCount} unverified candidate${possibleOfferCount === 1 ? "" : "s"} were found`}.`
-        : searxngSearchError || tavilySearchError || openRouterSearchError || shoppingSearchError || "Configured search sources failed; saved offers were retained and refresh should be retried."
+        : providerIssues.length
+          ? `${providerIssues.join(" ")} Saved offers were retained.`
+          : "Configured search sources failed; saved offers were retained and refresh should be retried."
       : possibleOfferCount
         ? `Found ${possibleOfferCount} retailer-search result${possibleOfferCount === 1 ? "" : "s"}, but none has been confirmed on its product page yet.`
         : searxngSearchError
@@ -1047,6 +1074,12 @@ serve(async (req) => {
       provider_failures: shoppingFailures + (tavilySearchError ? 1 : 0) + (searxngSearchError ? 1 : 0) + (openRouterSearchError ? 1 : 0), duration_ms: durationMs,
       daily_budget_reached: shoppingBudgetReached || Boolean(tavilySearchError?.includes("daily Tavily")) || Boolean(searxngSearchError?.includes("daily SearXNG")) || Boolean(openRouterSearchError?.includes("daily web-search budget")),
       search_sources: [apiKey ? "google_shopping" : null, tavilySearchAttempted ? "tavily" : null, searxngSearchAttempted ? "searxng" : null, openRouterSearchAttempted ? "openrouter_web_search" : null].filter(Boolean),
+      provider_status: {
+        serpapi: { configured: Boolean(apiKey), attempted: shoppingQueryCount > 0, error: apiKey ? shoppingSearchError : null },
+        tavily: { configured: Boolean(tavilyEnabled && tavilyKey), attempted: tavilySearchAttempted, error: tavilySearchError },
+        searxng: { configured: Boolean(searxngBaseUrl), attempted: searxngSearchAttempted || Boolean(searxngSearchError), error: searxngSearchError },
+        openrouter: { configured: Boolean(openRouterEnabled && openRouterKey), attempted: openRouterSearchAttempted, error: openRouterSearchError },
+      },
       error: errorMessage,
     });
   } catch {

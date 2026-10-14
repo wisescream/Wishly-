@@ -23,6 +23,29 @@ export interface SearXNGCandidate {
 
 const cooldownUntil = new Map<string, number>();
 const MAX_RETRY_AFTER_MS = 15 * 60_000;
+const PERSISTED_COOLDOWN_MS = 15 * 60_000;
+const COOLDOWN_MARKER = "_wishly_searxng_cooldown";
+
+/** Cache key shared across edge-function isolates for a SearXNG host cooldown. */
+export async function searXNGCooldownCacheKey(baseUrl: string): Promise<string | null> {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`searxng|cooldown|${parsed.hostname.toLowerCase()}`));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch { return null; }
+}
+
+export function isSearXNGCooldownCache(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>)[COOLDOWN_MARKER] === true);
+}
+
+export function searXNGCooldownCacheValue() {
+  return { [COOLDOWN_MARKER]: true, error_code: "rate_limited" };
+}
+
+export const searXNGPersistedCooldownMs = PERSISTED_COOLDOWN_MS;
 
 export interface SearXNGRetryOptions {
   now?: () => number;

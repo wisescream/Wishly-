@@ -4,7 +4,7 @@ import { parseEstimatedUnitCost, recordProviderMetric, type ProviderErrorCode } 
 import { resolveProviderCurrency } from "../_shared/provider-currency.ts";
 import { resolveSearchMarket } from "../_shared/search-market.ts";
 import { buildSerpApiShoppingRequest, classifySerpApiFailure, describeSerpApiHttpFailure, parseSerpApiShoppingResponse } from "../_shared/serpapi.ts";
-import { classifySearXNGFailure, parseSearXNGResponse, searchSearXNG, toSearXNGCandidates, type SearXNGResult } from "../_shared/searxng.ts";
+import { classifySearXNGFailure, isSearXNGCooldownCache, parseSearXNGResponse, searchSearXNG, searXNGCooldownCacheKey, searXNGCooldownCacheValue, searXNGPersistedCooldownMs, toSearXNGCandidates, type SearXNGResult } from "../_shared/searxng.ts";
 import { classifySeller, getRetailerDomain } from "../_shared/retailer-discovery.ts";
 import { providerBudgetState } from "../_shared/provider-budget.ts";
 
@@ -52,11 +52,18 @@ serve(async (req) => {
       const now = new Date().toISOString();
       const { data: cached } = await admin.from("retailer_search_cache").select("results")
         .eq("query_hash", queryHash).eq("provider", "searxng").gt("expires_at", now).maybeSingle();
+      const cooldownHash = await searXNGCooldownCacheKey(searxngBaseUrl);
+      const { data: cooldown } = cooldownHash
+        ? await admin.from("retailer_search_cache").select("results").eq("query_hash", cooldownHash)
+          .eq("provider", "searxng").gt("expires_at", now).maybeSingle()
+        : { data: null };
       let leads: SearXNGResult[] = Array.isArray(cached?.results)
         ? parseSearXNGResponse({ results: cached.results })
         : [];
-      let fallbackError: string | null = null;
-      if (!cached) {
+      let fallbackError: string | null = isSearXNGCooldownCache(cooldown?.results)
+        ? "SearXNG is temporarily rate-limited; Wishly skipped it during cooldown."
+        : null;
+      if (!cached && !isSearXNGCooldownCache(cooldown?.results)) {
         const dailyLimit = Math.max(1, Math.min(100000, Number.parseInt(Deno.env.get("SEARXNG_DAILY_SEARCH_LIMIT") || "20", 10) || 20));
         const { data: reserved, error: budgetError } = await admin.rpc("reserve_provider_search", { p_provider: "searxng", p_daily_limit: dailyLimit });
         const budgetState = providerBudgetState(reserved, budgetError);
@@ -72,7 +79,18 @@ serve(async (req) => {
           try {
             const result = await searchSearXNG(searxngBaseUrl, query, market.hl);
             statusCode = result.response.status;
-            if (!result.response.ok) { searxErrorCode = classifySearXNGFailure(result.response.status); fallbackError = `SearXNG returned HTTP ${result.response.status}.`; }
+            if (!result.response.ok) {
+              searxErrorCode = classifySearXNGFailure(result.response.status);
+              fallbackError = result.response.status === 429
+                ? "SearXNG returned HTTP 429 (rate limited); Wishly will cool it down before trying again."
+                : `SearXNG returned HTTP ${result.response.status}.`;
+              if (result.response.status === 429 && cooldownHash) {
+                await admin.from("retailer_search_cache").upsert({
+                  query_hash: cooldownHash, provider: "searxng", results: searXNGCooldownCacheValue(),
+                  expires_at: new Date(Date.now() + searXNGPersistedCooldownMs).toISOString(),
+                }, { onConflict: "query_hash" });
+              }
+            }
             else {
               leads = result.results;
               outcome = "success";
@@ -98,7 +116,7 @@ serve(async (req) => {
       if (mode === "offers") {
         return json({
           configured: true, candidates: [], offers: [], search_sources: ["searxng"],
-          error: "SearXNG found public page leads only; Wishly needs an inspected product page before it can report an offer price.",
+          error: fallbackError || primaryError || "SearXNG found public page leads only; Wishly needs an inspected product page before it can report an offer price.",
         });
       }
       const candidates = toSearXNGCandidates(leads);

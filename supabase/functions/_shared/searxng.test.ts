@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildSearXNGSearchUrl, parseSearXNGResponse, searchSearXNG, toSearXNGCandidates } from "./searxng.ts";
+import { buildSearXNGSearchUrl, isSearXNGCooldownCache, parseSearXNGResponse, searchSearXNG, searXNGCooldownCacheKey, searXNGCooldownCacheValue, toSearXNGCandidates } from "./searxng.ts";
 
 describe("SearXNG web-search fallback", () => {
   it("builds an HTTPS JSON search URL with a bounded query and language", () => {
@@ -74,6 +74,14 @@ describe("SearXNG web-search fallback", () => {
     expect(result.response.status).toBe(200);
     expect(sleep).toHaveBeenCalledWith(7_000);
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses a host-wide persistent cooldown marker without exposing the configured URL", async () => {
+    const key = await searXNGCooldownCacheKey("https://search.example/custom/path");
+    expect(key).toMatch(/^[a-f0-9]{64}$/);
+    expect(await searXNGCooldownCacheKey("http://search.example")).toBeNull();
+    expect(isSearXNGCooldownCache(searXNGCooldownCacheValue())).toBe(true);
+    expect(isSearXNGCooldownCache([{ title: "normal cached results" }])).toBe(false);
   });
 
   it("aborts timed out requests", async () => {
